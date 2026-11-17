@@ -72,9 +72,11 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private var started = false
+    private var radial: RadialMenu?
 
     private func start() {
         started = true
+        startRadialMenu()
         DockApps.sync()
         refreshTitle()
         var state = AgentState.load()
@@ -85,6 +87,20 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         // Give login items time to open their windows before rearranging.
         restoreDesktopOnce(after: 10)
+    }
+
+    /// Opens the radial menu on a four-finger trackpad click or tap.
+    private func startRadialMenu() {
+        let menu = RadialMenu(hooks: .init(
+            perform: { [weak self] body in self?.perform(body) },
+            notify: { [weak self] message in self?.notify(message) },
+            labelCurrent: { [weak self] in self?.labelCurrent() },
+            refresh: { [weak self] in self?.refreshTitle() }))
+        radial = menu
+        FourFingerClick.handler = { [weak menu] point in menu?.toggle(at: point) }
+        Trackpad.onTap = { [weak menu] in menu?.toggle(at: NSEvent.mouseLocation) }
+        if !Trackpad.start() { Log.write("No trackpad found, so the radial menu cannot open.") }
+        if !FourFingerClick.install() { Log.write("Could not watch for four-finger clicks.") }
     }
 
     @objc private func desktopChanged() {

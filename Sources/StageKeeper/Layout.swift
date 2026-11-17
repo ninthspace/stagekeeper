@@ -192,8 +192,9 @@ enum Matcher {
     }
 
     /// For each live stage, the index of the named or coloured saved stage it overlaps most
-    /// (each saved stage used once). Bookmarked windows do not count: they move between stages,
-    /// so a stage you fetch one into would otherwise take the name of the stage it came from.
+    /// (each saved stage used once). Bookmarked windows count for little: they move between
+    /// stages, so a stage you fetch one into would otherwise take the name of the stage it came
+    /// from. They still count, so a stage made mostly of bookmarked windows keeps its name.
     static func savedIndices(_ layout: Layout?, _ snapshot: Snapshot) -> [Int?] {
         var result = snapshot.stages.map { _ -> Int? in nil }
         guard let layout else { return result }
@@ -201,9 +202,10 @@ enum Matcher {
         let bookmarked = Set(Pins.load().filter { System.sameBoot($0.bootTime) }.map(\.windowID))
         var pairs: [(overlap: Int, live: Int, saved: Int)] = []
         for (l, live) in snapshot.stages.enumerated() {
-            let liveSet = Set(live.windowIDs).subtracting(bookmarked)
+            let liveSet = Set(live.windowIDs)
             for (s, saved) in layout.stages.enumerated() where saved.isIdentified {
-                let overlap = matched[s].compactMap { $0 }.filter(liveSet.contains).count
+                let shared = matched[s].compactMap { $0 }.filter(liveSet.contains)
+                let overlap = shared.filter { !bookmarked.contains($0) }.count * 100 + shared.filter(bookmarked.contains).count
                 if overlap > 0 { pairs.append((overlap, l, s)) }
             }
         }
@@ -421,7 +423,6 @@ enum Actions {
         if switched, !carryPins {
             let names = stage.windowIDs.compactMap { snapshot.windows[$0]?.appName }
             Log.write("Switched to the stage with \(Array(Set(names)).sorted().joined(separator: ", ")).")
-            try checkForMerges(stageGroups(snapshot, leaving: []), after: "switching stage")
         }
         guard switched, carryPins else { return }
         if !pinned.isEmpty { carry(pinned, frames: frames, thenFocus: id) }
@@ -515,10 +516,12 @@ enum Actions {
     /// Moves the front window of the current stage into the stage holding `targetWindow`:
     /// switches to that stage, then drags the window's preview out of the strip into it.
     /// Blocks for a couple of seconds, so call it off the main thread.
-    static func moveFrontWindow(toStageWith targetWindow: CGWindowID) throws {
+    /// `window` picks a window of the current stage other than the front one.
+    static func moveFrontWindow(toStageWith targetWindow: CGWindowID, window chosen: CGWindowID? = nil) throws {
         let started = Date()
         let snapshot = try Snapshot.take()
-        guard let front = frontWindow(snapshot), let name = snapshot.windows[front]?.appName else {
+        guard let front = chosen.flatMap({ snapshot.current.contains($0) ? $0 : nil }) ?? frontWindow(snapshot),
+              let name = snapshot.windows[front]?.appName else {
             throw StageError.other("The current stage has no window to move.")
         }
         Log.write("Moving the \(name) window \"\(snapshot.windows[front]?.title ?? "")\".")

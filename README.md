@@ -36,6 +36,17 @@ The menu lists every stage by its label (or by its apps when it has no label). C
 
 Your windows move aside for about a second while it works (see How it works).
 
+### Radial menu
+
+Click or tap the trackpad with four fingers to open a round menu at the pointer. It does not take focus, so the app you were using stays in front. Tile, Bookmark and Move act on the window of the current stage that was under the pointer when the menu opened, or on the front window when the pointer was not over one. Esc, a click outside, another four-finger click or tap, or the centre closes it.
+
+- **Inner ring:** this desktop's stages (up to eight), labelled ones first in shortcut order. A labelled stage shows its label under a dot of its colour; a stage without a label shows its position in the ring, and the box under the menu names its apps. The current stage is outlined in white. Click one to switch to it. Hold ⌥ while clicking to move the front window there instead.
+- **Outer ring**, clockwise from the top: Tile, Bookmark, Fetch Bookmarked Windows, other desktops' stages, Move, Colour, Label, Save. Other desktops, Move and Colour replace the inner ring with their choices; the centre then goes back.
+- **Tile:** pointing at Tile opens an arc outside the menu with nine positions for the front window: halves, quarters and Maximise. The window fills that part of the screen, using its full width; Stage Manager then hides the strip until you move the pointer to the left edge.
+- The box under the menu names what you are pointing at.
+
+macOS has no public way to count the fingers on a trackpad, so StageKeeper reads them through the private MultitouchSupport framework, as BetterTouchTool does, and takes the four-finger click out of the event stream so the app under the pointer does not see it. macOS sends no event for a tap of more than two fingers, so StageKeeper recognises a tap itself: four fingers down and lifted within 0.3 seconds without moving. A four-finger swipe moves the fingers, so it does not count as a tap.
+
 ### Bookmarked windows
 
 **Bookmark <App> Window** bookmarks the window you are working in. **Fetch Bookmarked Windows** (⌃⌥0, available while a window is bookmarked) brings bookmarked windows from other stages into the stage you are in: for each one, StageKeeper goes to the stage holding it, brings it to the front, switches back, then drags its preview out of the strip into your stage and puts it back at its position and size. **Bookmarked Windows** lists the bookmarks; choose one to remove it. A bookmarked window that is closed loses its bookmark, and bookmarks are matched by app and window title after a restart. Bookmarked windows stay on their own desktop.

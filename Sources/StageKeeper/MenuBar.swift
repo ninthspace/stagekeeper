@@ -165,6 +165,9 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch Result(catching: { try Snapshot.take() }) {
         case .success(let snapshot):
             let indices = Matcher.savedIndices(layout, snapshot)
+            missingStages = (layout?.stages ?? []).enumerated()
+                .filter { $0.element.label != nil && $0.element.id != nil && !indices.contains($0.offset) }
+                .map(\.element)
             for (index, stage) in snapshot.stages.enumerated() {
                 let saved = indices[index].flatMap { layout?.stages[$0] }
                 let apps = appNames(stage, snapshot)
@@ -190,7 +193,22 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 menu.addItem(entry)
             }
         case .failure(let error):
+            missingStages = []
             menu.addItem(withTitle: "\(error)", action: nil, keyEquivalent: "")
+        }
+        // Labelled stages on this desktop whose windows are not open here (closed, or moved to
+        // another desktop). Choosing one offers to forget it.
+        for stage in missingStages {
+            let entry = NSMenuItem(title: "\(stage.label!) (no open windows)", action: #selector(forgetStage(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = stage.id!.uuidString
+            entry.toolTip = "None of this stage's windows are open on this desktop. Choose to forget it."
+            if let n = numbers[stage.id!] {
+                entry.keyEquivalent = String(n)
+                entry.keyEquivalentModifierMask = Hotkeys.modifiers
+            }
+            if let colour = stage.color { entry.image = Palette.dot(colour) }
+            menu.addItem(entry)
         }
         // Labelled stages on other desktops, which Stage Manager does not show from here.
         for other in LayoutStore.loadAll() where other.desktop != desktop.key {
@@ -215,15 +233,15 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add(menu, "Label Current Stage…", #selector(labelCurrent), "l")
         if let snapshot = try? Snapshot.take(), let front = Actions.frontWindow(snapshot), let window = snapshot.windows[front] {
             let pinned = Pins.isPinned(front, snapshot)
-            let pinItem = NSMenuItem(title: "\(pinned ? "Unpin" : "Pin") \(window.appName) Window", action: #selector(togglePin(_:)), keyEquivalent: "")
+            let pinItem = NSMenuItem(title: "\(pinned ? "Remove Bookmark from" : "Bookmark") \(window.appName) Window", action: #selector(togglePin(_:)), keyEquivalent: "")
             pinItem.target = self
             pinItem.representedObject = NSNumber(value: front)
-            pinItem.toolTip = "A pinned window comes along when you switch stage with StageKeeper's shortcuts, Dock apps or menu."
+            pinItem.toolTip = "Fetch Bookmarked Windows (⌃⌥0) brings bookmarked windows into the stage you are in."
             menu.addItem(pinItem)
         }
         let pins = Pins.load()
         if !pins.isEmpty {
-            let fetch = NSMenuItem(title: "Fetch Pinned Windows", action: #selector(fetchPinned), keyEquivalent: "0")
+            let fetch = NSMenuItem(title: "Fetch Bookmarked Windows", action: #selector(fetchPinned), keyEquivalent: "0")
             fetch.keyEquivalentModifierMask = Hotkeys.modifiers
             fetch.target = self
             menu.addItem(fetch)
@@ -232,10 +250,10 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let entry = NSMenuItem(title: "\(pin.appName) — \(pin.title.isEmpty ? "untitled" : pin.title)", action: #selector(unpinListed(_:)), keyEquivalent: "")
                 entry.target = self
                 entry.representedObject = NSNumber(value: index)
-                entry.toolTip = "Choose to unpin."
+                entry.toolTip = "Choose to remove the bookmark."
                 pinsMenu.addItem(entry)
             }
-            let pinsItem = NSMenuItem(title: "Pinned Windows", action: nil, keyEquivalent: "")
+            let pinsItem = NSMenuItem(title: "Bookmarked Windows", action: nil, keyEquivalent: "")
             pinsItem.submenu = pinsMenu
             menu.addItem(pinsItem)
         }
@@ -284,7 +302,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         perform {
             let snapshot = try Snapshot.take()
             guard let stage = snapshot.stages.first(where: { $0.windowIDs.contains(id) }) else { return }
-            Actions.switchTo(stage, in: snapshot)
+            try Actions.switchTo(stage, in: snapshot)
         }
     }
 
@@ -293,11 +311,27 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
               let window = snapshot.windows[id] else { return }
         if Pins.isPinned(id, snapshot) {
             Pins.unpin(id)
-            notify("Unpinned the \(window.appName) window.")
+            notify("Removed the bookmark from the \(window.appName) window.")
         } else {
             Pins.pin(window)
-            notify("Pinned the \(window.appName) window. It comes along when you switch stage with StageKeeper's shortcuts, Dock apps or menu.")
+            notify("Bookmarked the \(window.appName) window. Press ⌃⌥0 to bring bookmarked windows into the stage you are in.")
         }
+    }
+
+    private var missingStages: [SavedStage] = []
+
+    @objc private func forgetStage(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let id = UUID(uuidString: raw),
+              let (layout, index) = Actions.locate(id), let label = layout.stages[index].label else { return }
+        let alert = NSAlert()
+        alert.messageText = "Forget \(label)?"
+        alert.informativeText = "None of its windows are open on this desktop. Forgetting it removes its label, colour, shortcut and Dock app. Your windows are not affected."
+        alert.addButton(withTitle: "Forget")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.level = .modalPanel
+        NSApp.activate()
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do { try Actions.forget(id); refreshTitle() } catch { notify("\(error)") }
     }
 
     @objc private func fetchPinned() {

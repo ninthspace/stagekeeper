@@ -128,7 +128,7 @@ enum StripClick {
     static func withStripVisible(_ body: ([StripItem]) -> Void) {
         let original = Mouse.location
         var moved: [(AXUIElement, CGRect)] = []
-        if let strip = try? Snapshot.readStrip(), !onScreen(strip), let snapshot = try? Snapshot.take() {
+        if let strip = try? Snapshot.readStrip(), !onScreen(strip), let snapshot = settledSnapshot() {
             // The strip's width when shown: thumbnails start 16 points from the edge.
             let widest = strip.compactMap { AX.frame($0.button)?.width }.max() ?? 230
             let clearance = 16 + widest + 24
@@ -140,6 +140,8 @@ enum StripClick {
                 if frame.maxX > clearance + 300 { cleared.size.width = frame.maxX - clearance }
                 AX.setFrame(window.element, cleared)
             }
+            let names = snapshot.current.compactMap { snapshot.windows[$0]?.appName }
+            Log.write("Uncovering the strip; the current stage reads as: \(names.joined(separator: ", ")).")
         }
         if let strip = waitForStrip() {
             body(strip)
@@ -152,7 +154,22 @@ enum StripClick {
         Mouse.move(original)
     }
 
-    private static func onScreen(_ strip: [StripItem]) -> Bool {
+    /// The stages once the current stage has read the same three times in a row (up to two
+    /// seconds). Just after a switch, windows of the stage being left, or of other stages, still
+    /// read as current; moving one of those makes Stage Manager bring its stage forward.
+    private static func settledSnapshot() -> Snapshot? {
+        guard var latest = try? Snapshot.take() else { return nil }
+        var steady = 0
+        for _ in 0..<14 where steady < 2 {
+            usleep(150_000)
+            guard let next = try? Snapshot.take() else { return nil }
+            steady = Set(next.current) == Set(latest.current) && Set(next.strip.flatMap(\.windowIDs)) == Set(latest.strip.flatMap(\.windowIDs)) ? steady + 1 : 0
+            latest = next
+        }
+        return latest
+    }
+
+        private static func onScreen(_ strip: [StripItem]) -> Bool {
         strip.allSatisfy { (AX.frame($0.button)?.minX ?? -1) >= 0 }
     }
 

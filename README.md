@@ -28,7 +28,7 @@ To remove it, run `./scripts/uninstall.sh`. The saved layout is kept.
 
 At login the app waits 10 seconds, opens any saved app that is not running, waits up to 90 seconds for the saved windows to appear, then rebuilds the stages. It restores once per boot, so quitting and reopening the app does not rearrange your windows. **Restore Layout** in the menu runs a restore at any time.
 
-The menu lists every stage by its label (or by its apps when it has no label). Choose one to switch to it.
+The menu lists every stage by its label (or by its apps when it has no label). Choose one to switch to it. A labelled stage none of whose windows are open on this desktop (they were closed, or moved to another desktop) is listed as "(no open windows)"; choose it to forget the stage, which removes its label, colour, shortcut and Dock app. If its windows come back into one stage, the label matches them again without forgetting.
 
 ### Moving a window to another stage
 
@@ -36,11 +36,11 @@ The menu lists every stage by its label (or by its apps when it has no label). C
 
 Your windows move aside for about a second while it works (see How it works).
 
-### Pinned windows
+### Bookmarked windows
 
-**Pin <App> Window** pins the window you are working in. When you switch stage with StageKeeper (⌃⌥1–9, a Dock app, or a stage in the menu), pinned windows come along: StageKeeper brings them to the front of the stage you are leaving, switches, then drags them into the new stage and puts them back at their position and size. A switch takes about two seconds while a window is pinned. **Pinned Windows** lists the pins; choose one to unpin it. A pinned window that is closed is unpinned, and pins are matched by app and window title after a restart.
+**Bookmark <App> Window** bookmarks the window you are working in. **Fetch Bookmarked Windows** (⌃⌥0, available while a window is bookmarked) brings bookmarked windows from other stages into the stage you are in: for each one, StageKeeper goes to the stage holding it, brings it to the front, switches back, then drags its preview out of the strip into your stage and puts it back at its position and size. **Bookmarked Windows** lists the bookmarks; choose one to remove it. A bookmarked window that is closed loses its bookmark, and bookmarks are matched by app and window title after a restart. Bookmarked windows stay on their own desktop.
 
-After a switch you make yourself, use **Fetch Pinned Windows** (⌃⌥0, available while a window is pinned): StageKeeper goes to the stage holding the pinned window, which brings it to the front, and switches back carrying it. Switches you make yourself, by clicking the strip or with ⌘Tab, do not bring pinned windows on their own: StageKeeper would have to react while the strip is still animating and grab a preview from under other windows' previews, which moved the wrong windows in testing. Pinned windows also stay on their own desktop.
+Switching stage does not bring bookmarked windows on its own; only ⌃⌥0 does. Each drag of a window preview out of the strip can take the whole stage instead of one window, which merges two stages, and doing that on every switch merged stages in use. If a drag brings other windows along, StageKeeper stops fetching and logs which windows joined.
 
 ### Desktops
 

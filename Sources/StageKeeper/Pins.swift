@@ -1,13 +1,11 @@
 import AppKit
 
-/// A window that comes with you when StageKeeper switches stage (⌃⌥1–9, Dock apps, the menu).
-///
-/// Stage Manager has no such setting. Before switching, StageKeeper brings the pinned windows to
-/// the front of the stage you are leaving, so their previews are on top of that stage's strip
-/// thumbnail, then switches and drags them into the new stage. Switches you make yourself, by
-/// clicking the strip or with ⌘Tab, do not carry pinned windows: reacting to those means reading
-/// the strip while it animates and grabbing previews buried under others, which moved the wrong
-/// windows.
+/// A bookmarked window (called a pin in the code): Fetch Bookmarked Windows (⌃⌥0) brings it
+/// into the current stage from whichever stage holds it. Stage Manager has no such setting, so
+/// StageKeeper switches to the window's stage, which brings it to the front, switches back, and
+/// drags its preview out of the strip. Ordinary switches leave bookmarked windows where they are:
+/// a drag can take a whole stage instead of one window, and doing that on every switch merged
+/// stages.
 struct Pin: Codable, Equatable {
     var bundleID: String
     var appName: String
@@ -59,7 +57,7 @@ enum Pins {
             }
             if System.sameBoot(pin.bootTime) {
                 changed = true
-                Log.write("Unpinned the closed \(pin.appName) window \"\(pin.title)\".")
+                Log.write("Removed the bookmark from the closed \(pin.appName) window \"\(pin.title)\".")
                 return nil
             }
             return pin
@@ -76,13 +74,13 @@ enum Pins {
         var pins = load().filter { !($0.windowID == window.id && System.sameBoot($0.bootTime)) }
         pins.append(Pin(window: window, desktop: Desktops.current().key))
         save(pins)
-        Log.write("Pinned the \(window.appName) window \"\(window.title)\".")
+        Log.write("Bookmarked the \(window.appName) window \"\(window.title)\".")
     }
 
     static func unpin(_ id: CGWindowID) {
         let pins = load()
         save(pins.filter { !($0.windowID == id && System.sameBoot($0.bootTime)) })
-        if let pin = pins.first(where: { $0.windowID == id }) { Log.write("Unpinned the \(pin.appName) window \"\(pin.title)\".") }
+        if let pin = pins.first(where: { $0.windowID == id }) { Log.write("Removed the bookmark from the \(pin.appName) window \"\(pin.title)\".") }
     }
 
     static func unpin(at index: Int) {
@@ -90,6 +88,6 @@ enum Pins {
         guard pins.indices.contains(index) else { return }
         let pin = pins.remove(at: index)
         save(pins)
-        Log.write("Unpinned the \(pin.appName) window \"\(pin.title)\".")
+        Log.write("Removed the bookmark from the \(pin.appName) window \"\(pin.title)\".")
     }
 }

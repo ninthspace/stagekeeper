@@ -192,14 +192,16 @@ enum Matcher {
     }
 
     /// For each live stage, the index of the named or coloured saved stage it overlaps most
-    /// (each saved stage used once).
+    /// (each saved stage used once). Bookmarked windows do not count: they move between stages,
+    /// so a stage you fetch one into would otherwise take the name of the stage it came from.
     static func savedIndices(_ layout: Layout?, _ snapshot: Snapshot) -> [Int?] {
         var result = snapshot.stages.map { _ -> Int? in nil }
         guard let layout else { return result }
         let matched = match(layout, snapshot, loose: false)
+        let bookmarked = Set(Pins.load().filter { System.sameBoot($0.bootTime) }.map(\.windowID))
         var pairs: [(overlap: Int, live: Int, saved: Int)] = []
         for (l, live) in snapshot.stages.enumerated() {
-            let liveSet = Set(live.windowIDs)
+            let liveSet = Set(live.windowIDs).subtracting(bookmarked)
             for (s, saved) in layout.stages.enumerated() where saved.isIdentified {
                 let overlap = matched[s].compactMap { $0 }.filter(liveSet.contains).count
                 if overlap > 0 { pairs.append((overlap, l, s)) }
@@ -285,6 +287,18 @@ enum Actions {
         }
     }
 
+    /// Removes a saved stage, with its label, colour and Dock app, from its desktop's layout.
+    static func forget(_ id: UUID) throws {
+        guard let found = locate(id) else { throw StageError.other("That stage is no longer saved.") }
+        var layout = found.layout
+        let index = found.index
+        let label = layout.stages[index].label ?? "stage"
+        layout.stages.remove(at: index)
+        try LayoutStore.write(layout, keepPrevious: true)
+        DockApps.remove(id)
+        Log.write("Forgot the \"\(label)\" stage.")
+    }
+
     /// The layout and index of a saved stage, on any desktop.
     static func locate(_ id: UUID) -> (layout: Layout, index: Int)? {
         for layout in LayoutStore.loadAll() {
@@ -314,7 +328,7 @@ enum Actions {
             snapshot = try Snapshot.take()
         }
         guard let live else { throw StageError.other("\(name) has no open windows.") }
-        switchTo(snapshot.stages[live], in: snapshot)
+        try switchTo(snapshot.stages[live], in: snapshot)
     }
 
     /// Moves to another desktop. Presses Mission Control's "Switch to Desktop N" shortcut when it
@@ -366,8 +380,10 @@ enum Actions {
     /// Checks that the stage became current; the last attempt clicks the strip thumbnail instead,
     /// which is less reliable because Stage Manager often reports the hidden strip off screen.
     ///
-    /// Pinned windows in the stage being left come along (see `Pins`) unless `carryPins` is false.
-    static func switchTo(_ stage: LiveStage, in snapshot: Snapshot, carryPins: Bool = true, fetchLeftovers: Bool = true) {
+    /// With `carryPins`, pinned windows in the stage being left come along (see `Pins`). Only
+    /// Fetch Pinned Windows (⌃⌥0) does that: an ordinary switch leaves pinned windows where they
+    /// are, because a drag that takes a whole stage instead of one window merges two stages.
+    static func switchTo(_ stage: LiveStage, in snapshot: Snapshot, carryPins: Bool = false) throws {
         guard stage.kind != .current, let id = FocusHistory.frontmost(of: stage.windowIDs) else { return }
         let pinned = carryPins ? Pins.resolve(snapshot).filter { snapshot.current.contains($0) } : []
         var frames: [CGWindowID: CGRect] = [:]
@@ -402,14 +418,13 @@ enum Actions {
                 snapshot = after
             }
         }
+        if switched, !carryPins {
+            let names = stage.windowIDs.compactMap { snapshot.windows[$0]?.appName }
+            Log.write("Switched to the stage with \(Array(Set(names)).sorted().joined(separator: ", ")).")
+            try checkForMerges(stageGroups(snapshot, leaving: []), after: "switching stage")
+        }
         guard switched, carryPins else { return }
         if !pinned.isEmpty { carry(pinned, frames: frames, thenFocus: id) }
-        // Pinned windows that were not in the stage you left (for example after a switch you made
-        // by clicking the strip) are fetched from wherever they are.
-        if fetchLeftovers, let now = try? Snapshot.take(),
-           Pins.resolve(now).contains(where: { !now.current.contains($0) && now.stripItem(containing: $0) != nil }) {
-            do { try fetchPinned() } catch { Log.write("Fetching pinned windows after the switch: \(error)") }
-        }
     }
 
     /// Brings pinned windows that are in other stages into the current stage: for each stage
@@ -420,7 +435,8 @@ enum Actions {
         var snapshot = try Snapshot.take()
         guard let home = frontWindow(snapshot) else { throw StageError.other("There is no current stage to fetch into.") }
         let away = Pins.resolve(snapshot).filter { !snapshot.current.contains($0) && snapshot.stripItem(containing: $0) != nil }
-        guard !away.isEmpty else { throw StageError.other("No pinned windows are in other stages on this desktop.") }
+        guard !away.isEmpty else { throw StageError.other("No bookmarked windows are in other stages on this desktop.") }
+        let groups = stageGroups(snapshot, leaving: Set(Pins.resolve(snapshot)))
         var done = Set<CGWindowID>()
         for pin in away where !done.contains(pin) {
             guard let window = snapshot.windows[pin] else { continue }
@@ -435,11 +451,13 @@ enum Actions {
                 throw StageError.other("Could not go to the \(window.appName) window's stage.")
             }
             done.formUnion(snapshot.current)
-            switchTo(back, in: snapshot, fetchLeftovers: false)
+            try switchTo(back, in: snapshot, carryPins: true)
             snapshot = try Snapshot.take()
         }
+        try checkForMerges(groups, after: "fetching bookmarked windows")
+        snapshot = try Snapshot.take()
         let missing = Pins.resolve(snapshot).filter { away.contains($0) && !snapshot.current.contains($0) }
-        if !missing.isEmpty { throw StageError.other("Some pinned windows did not come. See the log.") }
+        if !missing.isEmpty { throw StageError.other("Some bookmarked windows did not come. See the log.") }
     }
 
     /// Drags pinned windows from the stage just left into the current one, puts each back at its
@@ -454,16 +472,16 @@ enum Actions {
         }
         for pin in pinned {
             guard let window = after.windows[pin] else {
-                Log.write("A pinned window was not found after the switch.")
+                Log.write("A bookmarked window was not found after the switch.")
                 continue
             }
             if after.current.contains(pin) { continue }
             guard after.stripItem(containing: pin) != nil else {
-                Log.write("The pinned \(window.appName) window is not in the strip, so it cannot be dragged.")
+                Log.write("The bookmarked \(window.appName) window is not in the strip, so it cannot be dragged.")
                 continue
             }
             guard StripClick.dragIntoCurrent(window) else {
-                Log.write("The pinned \(window.appName) window stayed behind: its preview was not found.")
+                Log.write("The bookmarked \(window.appName) window stayed behind: its preview was not found.")
                 continue
             }
             var arrived = false
@@ -476,7 +494,7 @@ enum Actions {
             if arrived, let frame = frames[pin], let element = after.windows[pin]?.element {
                 AX.setFrame(element, frame)
             } else if !arrived {
-                Log.write("The pinned \(window.appName) window stayed behind.")
+                Log.write("The bookmarked \(window.appName) window stayed behind.")
             }
         }
         if let window = (try? Snapshot.take())?.windows[focus] { AX.focus(window) }
@@ -509,7 +527,7 @@ enum Actions {
         guard let target = snapshot.stages.first(where: { $0.windowIDs.contains(targetWindow) }), target.kind != .current else {
             throw StageError.other("That stage is no longer open.")
         }
-        switchTo(target, in: snapshot, carryPins: false)
+        try switchTo(target, in: snapshot)
         // While Stage Manager animates the switch, the old stage's windows are still on screen
         // and read as current. Wait for the window to reach the strip.
         var after = try Snapshot.take()
@@ -524,6 +542,7 @@ enum Actions {
         guard let window = after.windows[front], after.stripItem(containing: front) != nil else {
             throw StageError.other("The \(name) window is not in the strip, so it cannot be dragged.")
         }
+        let groups = stageGroups(snapshot, leaving: [front])
         guard StripClick.dragIntoCurrent(window) else {
             throw StageError.other("Could not find the \(name) window in the strip. See the log for details.")
         }
@@ -534,7 +553,42 @@ enum Actions {
         }
         guard after.current.contains(front) else { throw StageError.other("Stage Manager did not take the \(name) window.") }
         if let originalFrame, let element = after.windows[front]?.element { AX.setFrame(element, originalFrame) }
+        try checkForMerges(groups, after: "moving the \(name) window")
         Log.write("Moved the \(name) window to another stage in \(String(format: "%.1f", Date().timeIntervalSince(started))) s.")
+    }
+
+    /// The windows of each stage in the strip and the current stage, leaving out `leaving` (the
+    /// windows that are meant to move).
+    private static func stageGroups(_ snapshot: Snapshot, leaving: Set<CGWindowID>) -> [Set<CGWindowID>] {
+        snapshot.stages.filter { $0.kind != .overflow }
+            .map { Set($0.windowIDs).subtracting(leaving) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Throws when two of the stages in `groups` are now one stage, which happens when a drag
+    /// takes a whole stage instead of one window. Waits for the stages to read the same three
+    /// times in a row first: while Stage Manager animates, windows of other stages briefly read
+    /// as current.
+    private static func checkForMerges(_ groups: [Set<CGWindowID>], after action: String) throws {
+        guard var latest = try? Snapshot.take() else { return }
+        func shape(_ snapshot: Snapshot) -> [Set<CGWindowID>] { snapshot.stages.map { Set($0.windowIDs) } }
+        var steady = 0
+        for _ in 0..<20 where steady < 2 {
+            usleep(150_000)
+            guard let next = try? Snapshot.take() else { return }
+            steady = shape(next) == shape(latest) ? steady + 1 : 0
+            latest = next
+        }
+        for stage in latest.stages where stage.kind != .overflow {
+            let ids = Set(stage.windowIDs)
+            let joined = groups.filter { !$0.isDisjoint(with: ids) }
+            guard joined.count > 1 else { continue }
+            let names = joined.map { group in
+                group.compactMap { latest.windows[$0] }.map { "\($0.appName) \"\($0.title)\"" }.sorted().joined(separator: ", ")
+            }
+            Log.write("After \(action), these stages are now one: \(names.map { "[\($0)]" }.joined(separator: " + ")).")
+            throw StageError.other("Two stages merged while \(action). See the log.")
+        }
     }
 
     /// Finds a labelled stage by shortcut number (1-based) or by label, ignoring case.

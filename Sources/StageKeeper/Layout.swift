@@ -374,12 +374,65 @@ enum Actions {
             } else if let strip = snapshot.stripItem(containing: id) {
                 StripClick.click(strip, shift: false)
             }
-            usleep(attempt < 3 ? 600_000 : 500_000)
-            guard let after = try? Snapshot.take() else { return }
-            if after.current.contains(id) { return }
+            // Poll rather than wait a fixed time: most switches finish well inside the limit.
+            var after: Snapshot?
+            for _ in 0..<8 {
+                usleep(80_000)
+                after = try? Snapshot.take()
+                if after?.current.contains(id) == true { return }
+            }
+            guard let after else { return }
             Log.write("Stage switch attempt \(attempt) did not take.")
             snapshot = after
         }
+    }
+
+    /// Moves the front window of the current stage into the stage holding `targetWindow`:
+    /// switches to that stage, then drags the window's preview out of the strip into it.
+    /// Blocks for a couple of seconds, so call it off the main thread.
+    static func moveFrontWindow(toStageWith targetWindow: CGWindowID) throws {
+        let started = Date()
+        let snapshot = try Snapshot.take()
+        let current = Set(snapshot.current)
+        // The focused window of the app you are working in. Window order alone can pick a
+        // window that shows on every stage, such as Outlook's reminders.
+        let focused = NSWorkspace.shared.frontmostApplication.flatMap { app -> CGWindowID? in
+            guard let element = AX.value(AX.application(app.processIdentifier), kAXFocusedWindowAttribute) else { return nil }
+            return AX.windowID(element as! AXUIElement)
+        }
+        guard let front = focused.flatMap({ current.contains($0) ? $0 : nil }) ?? Snapshot.zOrder().first(where: current.contains),
+              let name = snapshot.windows[front]?.appName else {
+            throw StageError.other("The current stage has no window to move.")
+        }
+        Log.write("Moving the \(name) window \"\(snapshot.windows[front]?.title ?? "")\" (\(focused == front ? "focused" : "front by window order")).")
+        guard let target = snapshot.stages.first(where: { $0.windowIDs.contains(targetWindow) }), target.kind != .current else {
+            throw StageError.other("That stage is no longer open.")
+        }
+        switchTo(target, in: snapshot)
+        // While Stage Manager animates the switch, the old stage's windows are still on screen
+        // and read as current. Wait for the window to reach the strip.
+        var after = try Snapshot.take()
+        for _ in 0..<18 where after.current.contains(front) {
+            usleep(100_000)
+            after = try Snapshot.take()
+        }
+        guard after.current.contains(targetWindow) else { throw StageError.other("Could not switch to that stage.") }
+        if after.current.contains(front) {
+            throw StageError.other("The \(name) window shows on every stage, or is already in that stage, so there is nothing to move.")
+        }
+        guard let window = after.windows[front], after.stripItem(containing: front) != nil else {
+            throw StageError.other("The \(name) window is not in the strip, so it cannot be dragged.")
+        }
+        guard StripClick.dragIntoCurrent(window) else {
+            throw StageError.other("Could not find the \(name) window in the strip. See the log for details.")
+        }
+        for _ in 0..<10 {
+            usleep(100_000)
+            after = try Snapshot.take()
+            if after.current.contains(front) { break }
+        }
+        guard after.current.contains(front) else { throw StageError.other("Stage Manager did not take the \(name) window.") }
+        Log.write("Moved the \(name) window to another stage in \(String(format: "%.1f", Date().timeIntervalSince(started))) s.")
     }
 
     /// Finds a labelled stage by shortcut number (1-based) or by label, ignoring case.

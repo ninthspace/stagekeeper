@@ -159,6 +159,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(withTitle: "Desktop \(desktop.number)", action: nil, keyEquivalent: "")
         }
         var currentColour: String?
+        let moveMenu = NSMenu()
         switch Result(catching: { try Snapshot.take() }) {
         case .success(let snapshot):
             let indices = Matcher.savedIndices(layout, snapshot)
@@ -177,6 +178,12 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if stage.kind == .current {
                     entry.state = .on
                     currentColour = saved?.color
+                } else if let first = stage.windowIDs.first {
+                    let move = NSMenuItem(title: saved?.label ?? apps, action: #selector(moveFrontWindow(_:)), keyEquivalent: "")
+                    move.target = self
+                    move.representedObject = NSNumber(value: first)
+                    if let colour = saved?.color { move.image = Palette.dot(colour) }
+                    moveMenu.addItem(move)
                 }
                 menu.addItem(entry)
             }
@@ -204,6 +211,11 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
         add(menu, "Label Current Stage…", #selector(labelCurrent), "l")
+        if !moveMenu.items.isEmpty {
+            let moveItem = NSMenuItem(title: "Move Front Window To", action: nil, keyEquivalent: "")
+            moveItem.submenu = moveMenu
+            menu.addItem(moveItem)
+        }
         let colours = NSMenu()
         for (name, hex) in Palette.colours {
             let entry = NSMenuItem(title: name, action: #selector(colourCurrent(_:)), keyEquivalent: "")
@@ -246,6 +258,11 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let stage = snapshot.stages.first(where: { $0.windowIDs.contains(id) }) else { return }
             Actions.switchTo(stage, in: snapshot)
         }
+    }
+
+    @objc private func moveFrontWindow(_ sender: NSMenuItem) {
+        guard let target = (sender.representedObject as? NSNumber)?.uint32Value else { return }
+        perform { try Actions.moveFrontWindow(toStageWith: target) }
     }
 
     @objc private func switchSaved(_ sender: NSMenuItem) {

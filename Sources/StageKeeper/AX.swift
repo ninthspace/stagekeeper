@@ -80,62 +80,174 @@ enum AX {
     }
 }
 
+/// Clicks and drags on the Stage Manager strip.
+///
 /// Stage Manager on macOS 27 reports AXPress / AXAddToStage on strip thumbnails as successful
-/// but ignores them, so stages are switched and merged with real mouse clicks instead:
-/// a click switches to the stage, a shift-click adds it to the current stage.
+/// but ignores them, so the strip is worked with real mouse events. That needs the strip on
+/// screen: while any window covers its area Stage Manager slides it off the left edge (both
+/// Accessibility and the window list then report it about 255 points off screen), and simulated
+/// pointer moves to the edge do not bring it back. So each action first moves the current
+/// stage's windows out of the strip's area, waits for the strip to come back, acts, and then
+/// puts the windows back.
 enum StripClick {
+    /// A click switches to the stage; a shift-click adds it to the current stage.
     static func click(_ item: StripItem, shift: Bool) {
-        guard let key = item.windowIDs.first, let initial = AX.frame(item.button), initial.width > 0 else {
-            AX.perform(item.button, shift ? "AXAddToStage" : kAXPressAction)
-            return
+        guard let key = item.windowIDs.first else { return }
+        withStripVisible { strip in
+            guard let frame = strip.first(where: { $0.windowIDs.contains(key) }).flatMap({ AX.frame($0.button) }) else {
+                Log.write("Strip thumbnail not found on screen; not clicking.")
+                return
+            }
+            Mouse.click(CGPoint(x: frame.midX, y: frame.midY), shift: shift)
         }
-        let source = CGEventSource(stateID: .hidSystemState)
-        let original = CGEvent(source: nil)?.location ?? .zero
-        let flags: CGEventFlags = shift ? .maskShift : []
+    }
 
-        func post(_ type: CGEventType, _ point: CGPoint) {
-            guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
-            event.flags = flags
-            event.post(tap: .cghidEventTap)
+    /// Drags one window's preview out of its strip thumbnail into the middle of the screen,
+    /// which adds just that window to the current stage. Returns false when the preview
+    /// could not be found.
+    @discardableResult
+    static func dragIntoCurrent(_ window: LiveWindow) -> Bool {
+        var dragged = false
+        withStripVisible { strip in
+            guard let item = strip.first(where: { $0.windowIDs.contains(window.id) }),
+                  let thumbnail = AX.frame(item.button),
+                  let preview = Previews.find(window, in: item, thumbnail: thumbnail,
+                                              windows: (try? Snapshot.take())?.windows ?? [:]) else {
+                Log.write("Window preview not found in the strip; not dragging.")
+                return
+            }
+            let screen = NSScreen.screens.first?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+            Mouse.drag(from: CGPoint(x: preview.midX, y: preview.midY), to: CGPoint(x: screen.midX, y: screen.midY))
+            dragged = true
         }
+        return dragged
+    }
 
-        // While the strip is hidden, Stage Manager reports every thumbnail off screen (x < 0),
-        // and it may replace the thumbnail elements when the strip slides out. So hold the
-        // pointer at the left edge, nudging it, and read the strip again until the thumbnail
-        // holding this stage's window is on screen and has stopped moving.
-        let edgeY = max(initial.midY, 1)
-        var previous: CGRect?
-        var frame: CGRect?
-        var seen: [String] = []
-        let deadline = Date().addingTimeInterval(2.5)
-        var step = 0
+    /// Clears the strip's area, runs `body` with the strip's thumbnails once they are on screen,
+    /// then moves the windows back.
+    static func withStripVisible(_ body: ([StripItem]) -> Void) {
+        let original = Mouse.location
+        var moved: [(AXUIElement, CGRect)] = []
+        if let strip = try? Snapshot.readStrip(), !onScreen(strip), let snapshot = try? Snapshot.take() {
+            // The strip's width when shown: thumbnails start 16 points from the edge.
+            let widest = strip.compactMap { AX.frame($0.button)?.width }.max() ?? 230
+            let clearance = 16 + widest + 24
+            for id in snapshot.current {
+                guard let window = snapshot.windows[id], let frame = AX.frame(window.element), frame.minX < clearance else { continue }
+                moved.append((window.element, frame))
+                var cleared = frame
+                cleared.origin.x = clearance
+                if frame.maxX > clearance + 300 { cleared.size.width = frame.maxX - clearance }
+                AX.setFrame(window.element, cleared)
+            }
+        }
+        if let strip = waitForStrip() {
+            body(strip)
+        } else {
+            Log.write("The strip did not come on screen.")
+        }
+        // Give Stage Manager time to take the click or drop before windows move again.
+        usleep(200_000)
+        for (element, frame) in moved { AX.setFrame(element, frame) }
+        Mouse.move(original)
+    }
+
+    private static func onScreen(_ strip: [StripItem]) -> Bool {
+        strip.allSatisfy { (AX.frame($0.button)?.minX ?? -1) >= 0 }
+    }
+
+    /// The strip once every thumbnail is on screen and unchanged between two reads, or nil
+    /// after 2 seconds.
+    private static func waitForStrip() -> [StripItem]? {
+        var previous: [CGRect] = []
+        let deadline = Date().addingTimeInterval(2)
         while Date() < deadline {
-            post(.mouseMoved, CGPoint(x: step % 2 == 0 ? 0 : 2, y: edgeY))
-            step += 1
-            usleep(90_000)
-            let current = (try? Snapshot.readStrip())?.first { $0.windowIDs.contains(key) }.flatMap { AX.frame($0.button) }
-            if seen.count < 30 { seen.append(current.map { "\(Int($0.minX)),\(Int($0.minY))" } ?? "none") }
-            guard let current, current.width > 0, current.minX >= 0 else { previous = nil; continue }
-            if current == previous { frame = current; break }
-            previous = current
+            guard let strip = try? Snapshot.readStrip() else { return nil }
+            let frames = strip.compactMap { AX.frame($0.button) }
+            if onScreen(strip), frames == previous { return strip }
+            previous = frames
+            usleep(100_000)
         }
-        guard let frame else {
-            Log.write("Strip thumbnail did not come on screen; not clicking. Positions seen: \(seen.joined(separator: " "))")
-            post(.mouseMoved, original)
-            return
+        return nil
+    }
+}
+
+/// The window previews Stage Manager draws inside strip thumbnails. Each preview is a window
+/// owned by WindowManager; the window list gives its position but not which window it shows.
+/// The window list gives a thumbnail's previews in the same order as the thumbnail's
+/// AXWindowsIDs, so a window's preview is the one at its position in that list. Previews are
+/// drawn in perspective, so their shapes are not the windows' shapes, but a wider window still
+/// has a wider preview: that is used as a check, and a preview that fails it is not used.
+enum Previews {
+    static func find(_ window: LiveWindow, in item: StripItem, thumbnail: CGRect, windows: [CGWindowID: LiveWindow]) -> CGRect? {
+        let area = thumbnail.insetBy(dx: -24, dy: -24)
+        let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        let previews: [CGRect] = info.compactMap { entry in
+            guard (entry[kCGWindowOwnerName as String] as? String) == "WindowManager",
+                  (entry[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  let b = entry[kCGWindowBounds as String] as? [String: Double] else { return nil }
+            let rect = CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0, width: b["Width"] ?? 0, height: b["Height"] ?? 0)
+            // App icons drawn on the thumbnails are 66 × 82.
+            let isIcon = abs(rect.width - 66) < 4 && abs(rect.height - 82) < 4
+            return !isIcon && area.contains(CGPoint(x: rect.midX, y: rect.midY)) ? rect : nil
         }
-        let target = CGPoint(x: frame.midX, y: frame.midY)
-        // Move along the strip rather than jumping, so the pointer never leaves it.
-        post(.mouseMoved, CGPoint(x: min(frame.minX + 8, target.x), y: target.y))
-        usleep(80_000)
-        post(.mouseMoved, target)
-        usleep(120_000)
-        post(.leftMouseDown, target)
+        guard let index = item.windowIDs.firstIndex(of: window.id) else { return nil }
+        guard previews.count == item.windowIDs.count else {
+            Log.write("The thumbnail shows \(previews.count) previews for \(item.windowIDs.count) windows; not dragging.")
+            return nil
+        }
+        let chosen = previews[index]
+        func aspect(_ r: CGRect) -> CGFloat { r.width / max(r.height, 1) }
+        guard let frame = AX.frame(window.element) else { return chosen }
+        for (other, id) in item.windowIDs.enumerated() where id != window.id {
+            guard let otherFrame = windows[id].flatMap({ AX.frame($0.element) }) else { continue }
+            let windowDifference = aspect(frame) - aspect(otherFrame)
+            guard abs(windowDifference) > 0.15 else { continue }
+            if (windowDifference > 0) != (aspect(chosen) > aspect(previews[other])) {
+                Log.write("The preview at the window's position does not match its shape; not dragging.")
+                return nil
+            }
+        }
+        return chosen
+    }
+}
+
+/// Simulated pointer events.
+enum Mouse {
+    private static let source = CGEventSource(stateID: .hidSystemState)
+
+    static var location: CGPoint { CGEvent(source: nil)?.location ?? .zero }
+
+    static func post(_ type: CGEventType, _ point: CGPoint, flags: CGEventFlags = []) {
+        guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
+        event.flags = flags
+        event.post(tap: .cghidEventTap)
+    }
+
+    static func move(_ point: CGPoint) { post(.mouseMoved, point) }
+
+    static func click(_ point: CGPoint, shift: Bool) {
+        let flags: CGEventFlags = shift ? .maskShift : []
+        post(.mouseMoved, point, flags: flags)
+        usleep(150_000)
+        post(.leftMouseDown, point, flags: flags)
         usleep(60_000)
-        post(.leftMouseUp, target)
+        post(.leftMouseUp, point, flags: flags)
         usleep(100_000)
-        if let event = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: original, mouseButton: .left) {
-            event.post(tap: .cghidEventTap)
+    }
+
+    static func drag(from start: CGPoint, to end: CGPoint) {
+        post(.mouseMoved, start)
+        usleep(80_000)
+        post(.leftMouseDown, start)
+        usleep(150_000)
+        for step in 1...12 {
+            let t = Double(step) / 12
+            post(.leftMouseDragged, CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t))
+            usleep(15_000)
         }
+        usleep(150_000)
+        post(.leftMouseUp, end)
+        usleep(100_000)
     }
 }

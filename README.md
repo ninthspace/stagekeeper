@@ -30,6 +30,12 @@ At login the app waits 10 seconds, opens any saved app that is not running, wait
 
 The menu lists every stage by its label (or by its apps when it has no label). Choose one to switch to it.
 
+### Moving a window to another stage
+
+**Move Front Window To** moves the front window of the current stage into another stage on this desktop. StageKeeper switches to that stage, then drags the window's preview out of the strip into it, as you would by hand. The window list gives each thumbnail's previews in the same order as Stage Manager lists the stage's windows, so the window's preview is the one at its position. As a check, a wider window must have a wider preview; if that fails, StageKeeper does not drag and says so.
+
+Your windows move aside for about a second while it works (see How it works).
+
 ### Desktops
 
 Stage Manager keeps separate stages on each desktop, and only shows the stages of the desktop you are on. StageKeeper keeps one saved layout per desktop:
@@ -86,6 +92,8 @@ The app icon's source is `Resources/AppIcon.svg`. After changing it, run `swift 
 ## How it works
 
 **Reading stages.** Each thumbnail in the Stage Manager strip is an accessibility button with an `AXWindowsIDs` attribute that lists the window IDs in that stage. The current stage is the set of on-screen standard windows that are not in the strip. The strip shows only a limited number of stages, so a window in neither place is an overflow window. Its grouping cannot be read, so it is saved as a stage of its own, one stage per app. Window titles, positions and sizes come from each app's accessibility windows. The private `_AXUIElementGetWindow` call maps each accessibility window to its window ID.
+
+**Clicking the strip.** Stage Manager ignores the accessibility actions on strip thumbnails, so StageKeeper uses real clicks and drags. While any window covers the strip's area, Stage Manager slides the strip off the left edge and reports it there, and a simulated pointer at the edge does not bring it back. So before each strip click or drag StageKeeper moves the current stage's windows out of the strip's area, waits for the strip to come back, acts, and moves the windows back. Switching stages does not need the strip: StageKeeper brings one of the stage's windows to the front and Stage Manager follows.
 
 **Matching windows after a restart.** Window IDs change on every boot, so each saved window is matched to a live one in three passes:
 

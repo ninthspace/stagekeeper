@@ -31,7 +31,7 @@ enum StageError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
-        case .notTrusted: return "This process does not have Accessibility permission (System Settings › Privacy & Security › Accessibility)."
+        case .notTrusted: return "This process does not have Accessibility permission in System Settings › Privacy & Security › Device Control and Data Access (called Accessibility before macOS 27)."
         case .stageManagerOff: return "Stage Manager is turned off."
         case .windowManagerMissing: return "The Stage Manager process (WindowManager) is not running."
         case .noLayout(let path): return "No saved layout at \(path). Run `stagekeeper save` first."
@@ -93,7 +93,7 @@ struct Snapshot {
         strip.first { $0.windowIDs.contains(id) }
     }
 
-    private static func readStrip() throws -> [StripItem] {
+    static func readStrip() throws -> [StripItem] {
         guard let wm = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.WindowManager").first else {
             throw StageError.windowManagerMissing
         }
@@ -134,6 +134,15 @@ struct Snapshot {
             }
         }
         return (windows, order)
+    }
+
+    /// Normal-level windows front to back, including windows Stage Manager has moved off screen.
+    static func zOrder() -> [CGWindowID] {
+        let info = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        return info.compactMap { entry in
+            guard (entry[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 else { return nil }
+            return (entry[kCGWindowNumber as String] as? NSNumber)?.uint32Value
+        }
     }
 
     private static func onScreenWindowIDs() -> Set<CGWindowID> {

@@ -253,15 +253,23 @@ enum Actions {
         switchTo(snapshot.stages[live], in: snapshot)
     }
 
-    /// Switches to a live stage by clicking its strip thumbnail, or by raising its window
-    /// when it is an overflow stage.
+    /// Switches to a live stage by focusing one of its windows, which Stage Manager follows.
+    /// Checks that the stage became current; the last attempt clicks the strip thumbnail instead,
+    /// which is less reliable because Stage Manager often reports the hidden strip off screen.
     static func switchTo(_ stage: LiveStage, in snapshot: Snapshot) {
-        guard stage.kind != .current, let id = stage.windowIDs.first else { return }
-        if let strip = snapshot.stripItem(containing: id) {
-            StripClick.click(strip.button, shift: false)
-        } else if let window = snapshot.windows[id] {
-            AX.perform(window.element, kAXRaiseAction)
-            NSRunningApplication(processIdentifier: window.pid)?.activate()
+        guard stage.kind != .current, let id = FocusHistory.frontmost(of: stage.windowIDs) else { return }
+        var snapshot = snapshot
+        for attempt in 1...3 {
+            if attempt < 3, let window = snapshot.windows[id] {
+                AX.focus(window)
+            } else if let strip = snapshot.stripItem(containing: id) {
+                StripClick.click(strip, shift: false)
+            }
+            usleep(attempt < 3 ? 600_000 : 500_000)
+            guard let after = try? Snapshot.take() else { return }
+            if after.current.contains(id) { return }
+            Log.write("Stage switch attempt \(attempt) did not take.")
+            snapshot = after
         }
     }
 
@@ -285,5 +293,30 @@ enum Actions {
             }
         }
         return lines.joined(separator: "\n")
+    }
+}
+
+/// Remembers which window was in front of each stage, so a switch brings that window back to
+/// the front rather than whichever window Stage Manager lists first. The menu-bar app records
+/// the front window of the current stage every time it reads the stages.
+enum FocusHistory {
+    private static var lastFront: [CGWindowID: Date] = [:]
+    private static let lock = NSLock()
+
+    static func note(_ snapshot: Snapshot) {
+        let current = Set(snapshot.current)
+        guard let front = Snapshot.zOrder().first(where: current.contains) else { return }
+        lock.lock(); defer { lock.unlock() }
+        lastFront[front] = Date()
+    }
+
+    /// The stage's window that was last in front; failing that, the front one by window order.
+    static func frontmost(of ids: [CGWindowID]) -> CGWindowID? {
+        lock.lock()
+        let remembered = ids.compactMap { id in lastFront[id].map { (id, $0) } }.max { $0.1 < $1.1 }?.0
+        lock.unlock()
+        if let remembered { return remembered }
+        let order = Snapshot.zOrder()
+        return ids.min { (order.firstIndex(of: $0) ?? .max) < (order.firstIndex(of: $1) ?? .max) }
     }
 }

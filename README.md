@@ -16,7 +16,7 @@ This builds the tool and installs:
 - `~/.local/bin/stagekeeper`: the command-line tool, a link to the binary inside the app.
 - `~/Library/LaunchAgents/local.stagekeeper.plist`: opens the app at login.
 
-When the menu-bar item says "Needs Accessibility", allow StageKeeper in System Settings › Privacy & Security › Accessibility. Without a certificate the install is signed ad hoc, so each reinstall changes the code hash and macOS asks again: remove the old entry and add the app again. To keep the permission across reinstalls, run `./scripts/make-signing-cert.sh` once. It creates a self-signed certificate, "StageKeeper Local Signing", in your login keychain, and `install.sh` signs with it from then on. To use a different certificate, set `SIGN_IDENTITY`.
+When the menu-bar item says "Needs Accessibility", allow StageKeeper in System Settings › Privacy & Security › Device Control and Data Access (called Accessibility before macOS 27). Without a certificate the install is signed ad hoc, so each reinstall changes the code hash and macOS asks again: remove the old entry and add the app again. To keep the permission across reinstalls, run `./scripts/make-signing-cert.sh` once. It creates a self-signed certificate, "StageKeeper Local Signing", in your login keychain, and `install.sh` signs with it from then on. To use a different certificate, set `SIGN_IDENTITY`.
 
 To remove it, run `./scripts/uninstall.sh`. The saved layout is kept.
 
@@ -70,6 +70,8 @@ stagekeeper agent               Run the menu-bar item.
 - Colour wallpapers: `Wallpapers/` in the same folder.
 - Dock apps: `~/Applications/StageKeeper Stages`. `uninstall.sh` removes them.
 - Log: `~/Library/Logs/StageKeeper.log`.
+
+The app icon's source is `Resources/AppIcon.svg`. After changing it, run `swift scripts/make-icon.swift` to rebuild `Resources/AppIcon.icns`.
 
 ## How it works
 

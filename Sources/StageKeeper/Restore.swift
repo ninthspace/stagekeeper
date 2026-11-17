@@ -125,7 +125,7 @@ struct Restorer {
         for id in target.dropFirst() {
             guard let snapshot = try? Snapshot.take(), !snapshot.current.contains(id) else { continue }
             if let item = snapshot.stripItem(containing: id) {
-                StripClick.click(item.button, shift: true)
+                StripClick.click(item, shift: true)
                 settle { $0.current.contains(id) }
             } else {
                 // The window is beyond the strip: switch to it, then pull the stage being built back in.
@@ -134,7 +134,7 @@ struct Restorer {
                 settle { $0.current.contains(id) }
                 if let after = try? Snapshot.take(),
                    let item = after.strip.first(where: { !building.isDisjoint(with: $0.windowIDs) }) {
-                    StripClick.click(item.button, shift: true)
+                    StripClick.click(item, shift: true)
                     settle { $0.current.contains(first) }
                 }
             }
@@ -147,11 +147,10 @@ struct Restorer {
     }
 
     private func bringForward(_ id: CGWindowID, _ snapshot: Snapshot) {
-        if let item = snapshot.stripItem(containing: id) {
-            StripClick.click(item.button, shift: false)
-        } else if let window = snapshot.windows[id] {
-            AX.perform(window.element, kAXRaiseAction)
-            NSRunningApplication(processIdentifier: window.pid)?.activate()
+        if let window = snapshot.windows[id] {
+            AX.focus(window)
+        } else if let item = snapshot.stripItem(containing: id) {
+            StripClick.click(item, shift: false)
         }
     }
 

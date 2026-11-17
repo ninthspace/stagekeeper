@@ -94,6 +94,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.image = Self.symbol
             return
         }
+        FocusHistory.note(snapshot)
         let indices = Matcher.savedIndices(layout, snapshot)
         let currentIndex = snapshot.stages.firstIndex { $0.kind == .current }
         let saved = currentIndex.flatMap { indices[$0] }.flatMap { layout?.stages[$0] }

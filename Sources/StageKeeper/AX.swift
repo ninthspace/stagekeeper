@@ -60,6 +60,14 @@ enum AX {
         AXUIElementPerformAction(element, action as CFString) == .success
     }
 
+    /// Makes one window the frontmost window of the frontmost app. Stage Manager then switches
+    /// to the stage that holds the window, with no need to click the strip.
+    static func focus(_ window: LiveWindow) {
+        perform(window.element, kAXRaiseAction)
+        AXUIElementSetAttributeValue(window.element, kAXMainAttribute as CFString, kCFBooleanTrue)
+        NSRunningApplication(processIdentifier: window.pid)?.activate(from: NSRunningApplication.current, options: [])
+    }
+
     static func application(_ pid: pid_t) -> AXUIElement {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 1.0)
@@ -76,14 +84,13 @@ enum AX {
 /// but ignores them, so stages are switched and merged with real mouse clicks instead:
 /// a click switches to the stage, a shift-click adds it to the current stage.
 enum StripClick {
-    static func click(_ button: AXUIElement, shift: Bool) {
-        guard let frame = AX.frame(button), frame.width > 0 else {
-            AX.perform(button, shift ? "AXAddToStage" : kAXPressAction)
+    static func click(_ item: StripItem, shift: Bool) {
+        guard let key = item.windowIDs.first, let initial = AX.frame(item.button), initial.width > 0 else {
+            AX.perform(item.button, shift ? "AXAddToStage" : kAXPressAction)
             return
         }
         let source = CGEventSource(stateID: .hidSystemState)
         let original = CGEvent(source: nil)?.location ?? .zero
-        let target = CGPoint(x: frame.midX, y: frame.midY)
         let flags: CGEventFlags = shift ? .maskShift : []
 
         func post(_ type: CGEventType, _ point: CGPoint) {
@@ -92,11 +99,37 @@ enum StripClick {
             event.post(tap: .cghidEventTap)
         }
 
-        // Touch the left screen edge first so the strip shows even when a window covers it.
-        post(.mouseMoved, CGPoint(x: 1, y: target.y))
-        usleep(450_000)
+        // While the strip is hidden, Stage Manager reports every thumbnail off screen (x < 0),
+        // and it may replace the thumbnail elements when the strip slides out. So hold the
+        // pointer at the left edge, nudging it, and read the strip again until the thumbnail
+        // holding this stage's window is on screen and has stopped moving.
+        let edgeY = max(initial.midY, 1)
+        var previous: CGRect?
+        var frame: CGRect?
+        var seen: [String] = []
+        let deadline = Date().addingTimeInterval(2.5)
+        var step = 0
+        while Date() < deadline {
+            post(.mouseMoved, CGPoint(x: step % 2 == 0 ? 0 : 2, y: edgeY))
+            step += 1
+            usleep(90_000)
+            let current = (try? Snapshot.readStrip())?.first { $0.windowIDs.contains(key) }.flatMap { AX.frame($0.button) }
+            if seen.count < 30 { seen.append(current.map { "\(Int($0.minX)),\(Int($0.minY))" } ?? "none") }
+            guard let current, current.width > 0, current.minX >= 0 else { previous = nil; continue }
+            if current == previous { frame = current; break }
+            previous = current
+        }
+        guard let frame else {
+            Log.write("Strip thumbnail did not come on screen; not clicking. Positions seen: \(seen.joined(separator: " "))")
+            post(.mouseMoved, original)
+            return
+        }
+        let target = CGPoint(x: frame.midX, y: frame.midY)
+        // Move along the strip rather than jumping, so the pointer never leaves it.
+        post(.mouseMoved, CGPoint(x: min(frame.minX + 8, target.x), y: target.y))
+        usleep(80_000)
         post(.mouseMoved, target)
-        usleep(150_000)
+        usleep(120_000)
         post(.leftMouseDown, target)
         usleep(60_000)
         post(.leftMouseUp, target)

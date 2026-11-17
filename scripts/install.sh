@@ -16,6 +16,8 @@ pkill -x stagekeeper 2>/dev/null || true
 mkdir -p "$APP/Contents/MacOS"
 cp .build/release/stagekeeper "$APP/Contents/MacOS/stagekeeper"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+mkdir -p "$APP/Contents/Resources"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # Sign with SIGN_IDENTITY, else the certificate from make-signing-cert.sh, else ad hoc.
 # A certificate keeps the Accessibility permission across reinstalls. With an ad hoc
 # signature every rebuild changes the code hash, so macOS asks for the permission again.
@@ -56,4 +58,4 @@ launchctl bootstrap "gui/$(id -u)" "$AGENT"
 
 echo "Installed $APP"
 echo "CLI: $HOME/.local/bin/stagekeeper"
-echo "If the menu bar shows 'Needs Accessibility', allow StageKeeper in System Settings › Privacy & Security › Accessibility."
+echo "If the menu bar shows 'Needs Accessibility', allow StageKeeper in System Settings › Privacy & Security › Device Control and Data Access (called Accessibility before macOS 27)."

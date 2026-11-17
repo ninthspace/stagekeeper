@@ -369,9 +369,12 @@ final class RadialView: NSView {
 
     func pointerMoved(to p: NSPoint) {
         let next = hit(p)
+        // Once open, the tile arc stays open while the pointer crosses the outer ring, so a
+        // position at either end of the arc can be reached in a straight line from Tile. Moving
+        // back into the inner ring or the centre closes it.
         switch next {
         case .outer(0): tileOpen = true
-        case .outer, .inner, .centre: tileOpen = false
+        case .inner, .centre: tileOpen = false
         default: break
         }
         hover = next

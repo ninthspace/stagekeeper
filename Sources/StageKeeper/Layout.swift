@@ -367,7 +367,7 @@ enum Actions {
     /// which is less reliable because Stage Manager often reports the hidden strip off screen.
     ///
     /// Pinned windows in the stage being left come along (see `Pins`) unless `carryPins` is false.
-    static func switchTo(_ stage: LiveStage, in snapshot: Snapshot, carryPins: Bool = true) {
+    static func switchTo(_ stage: LiveStage, in snapshot: Snapshot, carryPins: Bool = true, fetchLeftovers: Bool = true) {
         guard stage.kind != .current, let id = FocusHistory.frontmost(of: stage.windowIDs) else { return }
         let pinned = carryPins ? Pins.resolve(snapshot).filter { snapshot.current.contains($0) } : []
         var frames: [CGWindowID: CGRect] = [:]
@@ -402,8 +402,14 @@ enum Actions {
                 snapshot = after
             }
         }
-        guard switched, !pinned.isEmpty else { return }
-        carry(pinned, frames: frames, thenFocus: id)
+        guard switched, carryPins else { return }
+        if !pinned.isEmpty { carry(pinned, frames: frames, thenFocus: id) }
+        // Pinned windows that were not in the stage you left (for example after a switch you made
+        // by clicking the strip) are fetched from wherever they are.
+        if fetchLeftovers, let now = try? Snapshot.take(),
+           Pins.resolve(now).contains(where: { !now.current.contains($0) && now.stripItem(containing: $0) != nil }) {
+            do { try fetchPinned() } catch { Log.write("Fetching pinned windows after the switch: \(error)") }
+        }
     }
 
     /// Brings pinned windows that are in other stages into the current stage: for each stage
@@ -429,7 +435,7 @@ enum Actions {
                 throw StageError.other("Could not go to the \(window.appName) window's stage.")
             }
             done.formUnion(snapshot.current)
-            switchTo(back, in: snapshot)
+            switchTo(back, in: snapshot, fetchLeftovers: false)
             snapshot = try Snapshot.take()
         }
         let missing = Pins.resolve(snapshot).filter { away.contains($0) && !snapshot.current.contains($0) }
@@ -447,7 +453,15 @@ enum Actions {
             after = next
         }
         for pin in pinned {
-            guard let window = after.windows[pin], after.stripItem(containing: pin) != nil else { continue }
+            guard let window = after.windows[pin] else {
+                Log.write("A pinned window was not found after the switch.")
+                continue
+            }
+            if after.current.contains(pin) { continue }
+            guard after.stripItem(containing: pin) != nil else {
+                Log.write("The pinned \(window.appName) window is not in the strip, so it cannot be dragged.")
+                continue
+            }
             guard StripClick.dragIntoCurrent(window) else {
                 Log.write("The pinned \(window.appName) window stayed behind: its preview was not found.")
                 continue

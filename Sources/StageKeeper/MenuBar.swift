@@ -286,8 +286,12 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
             label.widthAnchor.constraint(lessThanOrEqualToConstant: 300),
         ])
+        // NSPopover takes its size from the view's frame, so size it to the text.
+        let text = label.fittingSize
+        container.frame = NSRect(x: 0, y: 0, width: min(text.width, 300) + 24, height: text.height + 20)
         controller.view = container
         popover.contentViewController = controller
+        popover.contentSize = container.frame.size
         popover.behavior = .transient
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) { popover.close() }

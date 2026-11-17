@@ -117,7 +117,7 @@ enum StripClick {
                 return
             }
             let screen = NSScreen.screens.first?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
-            Mouse.drag(from: CGPoint(x: preview.midX, y: preview.midY), to: CGPoint(x: screen.midX, y: screen.midY))
+            Mouse.drag(from: preview.grab, to: CGPoint(x: screen.midX, y: screen.midY))
             dragged = true
         }
         return dragged
@@ -156,15 +156,23 @@ enum StripClick {
         strip.allSatisfy { (AX.frame($0.button)?.minX ?? -1) >= 0 }
     }
 
-    /// The strip once every thumbnail is on screen and unchanged between two reads, or nil
-    /// after 2 seconds.
+    /// The strip once every thumbnail is on screen and neither the thumbnails nor the previews
+    /// inside them have moved over three reads, or nil after 2.5 seconds. After a stage switch
+    /// Stage Manager re-sorts the strip with an animation; reading positions during it picks
+    /// the wrong thumbnail.
     private static func waitForStrip() -> [StripItem]? {
         var previous: [CGRect] = []
-        let deadline = Date().addingTimeInterval(2)
+        var steady = 0
+        let deadline = Date().addingTimeInterval(2.5)
         while Date() < deadline {
             guard let strip = try? Snapshot.readStrip() else { return nil }
-            let frames = strip.compactMap { AX.frame($0.button) }
-            if onScreen(strip), frames == previous { return strip }
+            let frames = strip.compactMap { AX.frame($0.button) } + Previews.all()
+            if onScreen(strip), frames == previous {
+                steady += 1
+                if steady >= 2 { return strip }
+            } else {
+                steady = 0
+            }
             previous = frames
             usleep(100_000)
         }
@@ -179,18 +187,30 @@ enum StripClick {
 /// drawn in perspective, so their shapes are not the windows' shapes, but a wider window still
 /// has a wider preview: that is used as a check, and a preview that fails it is not used.
 enum Previews {
-    static func find(_ window: LiveWindow, in item: StripItem, thumbnail: CGRect, windows: [CGWindowID: LiveWindow]) -> CGRect? {
-        let area = thumbnail.insetBy(dx: -24, dy: -24)
+    /// Every preview and icon WindowManager draws in the strip, in window-list order.
+    static func all() -> [CGRect] {
         let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
-        let previews: [CGRect] = info.compactMap { entry in
+        return info.compactMap { entry in
             guard (entry[kCGWindowOwnerName as String] as? String) == "WindowManager",
                   (entry[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
                   let b = entry[kCGWindowBounds as String] as? [String: Double] else { return nil }
-            let rect = CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0, width: b["Width"] ?? 0, height: b["Height"] ?? 0)
-            // App icons drawn on the thumbnails are 66 × 82.
-            let isIcon = abs(rect.width - 66) < 4 && abs(rect.height - 82) < 4
-            return !isIcon && area.contains(CGPoint(x: rect.midX, y: rect.midY)) ? rect : nil
+            return CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0, width: b["Width"] ?? 0, height: b["Height"] ?? 0)
         }
+    }
+
+    /// The window's preview and a point on it to grab. Previews in a thumbnail overlap, and the
+    /// window list gives them front to back, so the grab point is a part of the preview that no
+    /// preview or icon in front of it covers. Previews are drawn in perspective, so the corners of
+    /// their bounding boxes are empty, and grabbing there takes the whole stage; only the middle
+    /// half of the preview is used. Returns nil when that part is covered.
+    static func find(_ window: LiveWindow, in item: StripItem, thumbnail: CGRect,
+                     windows: [CGWindowID: LiveWindow]) -> (rect: CGRect, grab: CGPoint)? {
+        let area = thumbnail.insetBy(dx: -24, dy: -24)
+        // Everything WindowManager draws on this thumbnail, front to back.
+        let drawn = all().filter { area.contains(CGPoint(x: $0.midX, y: $0.midY)) }
+        // App icons drawn on the thumbnails are 66 × 82.
+        func isIcon(_ r: CGRect) -> Bool { abs(r.width - 66) < 4 && abs(r.height - 82) < 4 }
+        let previews = drawn.filter { !isIcon($0) }
         guard let index = item.windowIDs.firstIndex(of: window.id) else { return nil }
         guard previews.count == item.windowIDs.count else {
             Log.write("The thumbnail shows \(previews.count) previews for \(item.windowIDs.count) windows; not dragging.")
@@ -198,17 +218,35 @@ enum Previews {
         }
         let chosen = previews[index]
         func aspect(_ r: CGRect) -> CGFloat { r.width / max(r.height, 1) }
-        guard let frame = AX.frame(window.element) else { return chosen }
-        for (other, id) in item.windowIDs.enumerated() where id != window.id {
-            guard let otherFrame = windows[id].flatMap({ AX.frame($0.element) }) else { continue }
-            let windowDifference = aspect(frame) - aspect(otherFrame)
-            guard abs(windowDifference) > 0.15 else { continue }
-            if (windowDifference > 0) != (aspect(chosen) > aspect(previews[other])) {
-                Log.write("The preview at the window's position does not match its shape; not dragging.")
-                return nil
+        if let frame = AX.frame(window.element) {
+            for (other, id) in item.windowIDs.enumerated() where id != window.id {
+                guard let otherFrame = windows[id].flatMap({ AX.frame($0.element) }) else { continue }
+                let windowDifference = aspect(frame) - aspect(otherFrame)
+                guard abs(windowDifference) > 0.15 else { continue }
+                if (windowDifference > 0) != (aspect(chosen) > aspect(previews[other])) {
+                    Log.write("The preview at the window's position does not match its shape; not dragging.")
+                    return nil
+                }
             }
         }
-        return chosen
+        // Sample the preview and keep the points nothing in front covers.
+        let inFront = Array(drawn.prefix { $0 != chosen })
+        let inner = chosen.insetBy(dx: chosen.width * 0.25, dy: chosen.height * 0.25)
+        var open: [CGPoint] = []
+        for i in 0...10 {
+            for j in 0...10 {
+                let point = CGPoint(x: inner.minX + inner.width * CGFloat(i) / 10, y: inner.minY + inner.height * CGFloat(j) / 10)
+                if !inFront.contains(where: { $0.contains(point) }) { open.append(point) }
+            }
+        }
+        guard !open.isEmpty else {
+            Log.write("The window's preview is covered by the previews in front of it; not dragging.")
+            return nil
+        }
+        // The open point nearest the middle of the open part, so the grab is not on an edge.
+        let middle = CGPoint(x: open.map(\.x).reduce(0, +) / CGFloat(open.count), y: open.map(\.y).reduce(0, +) / CGFloat(open.count))
+        let grab = open.min { hypot($0.x - middle.x, $0.y - middle.y) < hypot($1.x - middle.x, $1.y - middle.y) }!
+        return (chosen, grab)
     }
 }
 

@@ -32,9 +32,15 @@ The menu lists every stage by its label (or by its apps when it has no label). C
 
 ### Moving a window to another stage
 
-**Move Front Window To** moves the front window of the current stage into another stage on this desktop. StageKeeper switches to that stage, then drags the window's preview out of the strip into it, as you would by hand. The window list gives each thumbnail's previews in the same order as Stage Manager lists the stage's windows, so the window's preview is the one at its position. As a check, a wider window must have a wider preview; if that fails, StageKeeper does not drag and says so.
+**Move Front Window To** moves the front window of the current stage into another stage on this desktop. StageKeeper switches to that stage, then drags the window's preview out of the strip into it, as you would by hand, and puts the window back at its original position and size. The window list gives each thumbnail's previews in the same order as Stage Manager lists the stage's windows, so the window's preview is the one at its position. As a check, a wider window must have a wider preview; if that fails, StageKeeper does not drag and says so.
 
 Your windows move aside for about a second while it works (see How it works).
+
+### Pinned windows
+
+**Pin <App> Window** pins the window you are working in. When you switch stage with StageKeeper (⌃⌥1–9, a Dock app, or a stage in the menu), pinned windows come along: StageKeeper brings them to the front of the stage you are leaving, switches, then drags them into the new stage and puts them back at their position and size. A switch takes about two seconds while a window is pinned. **Pinned Windows** lists the pins; choose one to unpin it. A pinned window that is closed is unpinned, and pins are matched by app and window title after a restart.
+
+After a switch you make yourself, use **Fetch Pinned Windows** (⌃⌥0, available while a window is pinned): StageKeeper goes to the stage holding the pinned window, which brings it to the front, and switches back carrying it. Switches you make yourself, by clicking the strip or with ⌘Tab, do not bring pinned windows on their own: StageKeeper would have to react while the strip is still animating and grab a preview from under other windows' previews, which moved the wrong windows in testing. Pinned windows also stay on their own desktop.
 
 ### Desktops
 

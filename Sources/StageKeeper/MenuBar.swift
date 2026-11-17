@@ -5,6 +5,8 @@ struct AgentState: Codable {
     var lastRestoredBoot: Date?
     /// Desktops whose layout has been restored (or deliberately skipped) during that boot.
     var restoredDesktops: [String]?
+    /// Windows that come along when StageKeeper switches stage.
+    var pins: [Pin]?
     /// The user's own wallpaper per screen, put back on stages without a colour.
     var originalWallpapers: [String: String]?
 
@@ -119,7 +121,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func refreshTitle() {
         guard !busy, let button = item.button else { return }
         let layout = LayoutStore.load()
-        Hotkeys.register(count: Actions.numbered().count)
+        Hotkeys.register(count: Actions.numbered().count, fetch: !Pins.load().isEmpty)
         guard let snapshot = try? Snapshot.take() else {
             button.title = ""
             button.image = Self.symbol
@@ -211,6 +213,32 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
         add(menu, "Label Current Stage…", #selector(labelCurrent), "l")
+        if let snapshot = try? Snapshot.take(), let front = Actions.frontWindow(snapshot), let window = snapshot.windows[front] {
+            let pinned = Pins.isPinned(front, snapshot)
+            let pinItem = NSMenuItem(title: "\(pinned ? "Unpin" : "Pin") \(window.appName) Window", action: #selector(togglePin(_:)), keyEquivalent: "")
+            pinItem.target = self
+            pinItem.representedObject = NSNumber(value: front)
+            pinItem.toolTip = "A pinned window comes along when you switch stage with StageKeeper's shortcuts, Dock apps or menu."
+            menu.addItem(pinItem)
+        }
+        let pins = Pins.load()
+        if !pins.isEmpty {
+            let fetch = NSMenuItem(title: "Fetch Pinned Windows", action: #selector(fetchPinned), keyEquivalent: "0")
+            fetch.keyEquivalentModifierMask = Hotkeys.modifiers
+            fetch.target = self
+            menu.addItem(fetch)
+            let pinsMenu = NSMenu()
+            for (index, pin) in pins.enumerated() {
+                let entry = NSMenuItem(title: "\(pin.appName) — \(pin.title.isEmpty ? "untitled" : pin.title)", action: #selector(unpinListed(_:)), keyEquivalent: "")
+                entry.target = self
+                entry.representedObject = NSNumber(value: index)
+                entry.toolTip = "Choose to unpin."
+                pinsMenu.addItem(entry)
+            }
+            let pinsItem = NSMenuItem(title: "Pinned Windows", action: nil, keyEquivalent: "")
+            pinsItem.submenu = pinsMenu
+            menu.addItem(pinsItem)
+        }
         if !moveMenu.items.isEmpty {
             let moveItem = NSMenuItem(title: "Move Front Window To", action: nil, keyEquivalent: "")
             moveItem.submenu = moveMenu
@@ -260,6 +288,27 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    @objc private func togglePin(_ sender: NSMenuItem) {
+        guard let id = (sender.representedObject as? NSNumber)?.uint32Value, let snapshot = try? Snapshot.take(),
+              let window = snapshot.windows[id] else { return }
+        if Pins.isPinned(id, snapshot) {
+            Pins.unpin(id)
+            notify("Unpinned the \(window.appName) window.")
+        } else {
+            Pins.pin(window)
+            notify("Pinned the \(window.appName) window. It comes along when you switch stage with StageKeeper's shortcuts, Dock apps or menu.")
+        }
+    }
+
+    @objc private func fetchPinned() {
+        perform { try Actions.fetchPinned() }
+    }
+
+    @objc private func unpinListed(_ sender: NSMenuItem) {
+        guard let index = (sender.representedObject as? NSNumber)?.intValue else { return }
+        Pins.unpin(at: index)
+    }
+
     @objc private func moveFrontWindow(_ sender: NSMenuItem) {
         guard let target = (sender.representedObject as? NSNumber)?.uint32Value else { return }
         perform { try Actions.moveFrontWindow(toStageWith: target) }
@@ -271,6 +320,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func switchToNumber(_ number: Int) {
+        if number == 0 { fetchPinned(); return }
         let list = Actions.numbered()
         guard number >= 1, number <= list.count, let id = list[number - 1].id else { return }
         perform { try Actions.switchTo(id: id) }

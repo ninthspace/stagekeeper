@@ -365,10 +365,25 @@ enum Actions {
     /// Switches to a live stage by focusing one of its windows, which Stage Manager follows.
     /// Checks that the stage became current; the last attempt clicks the strip thumbnail instead,
     /// which is less reliable because Stage Manager often reports the hidden strip off screen.
-    static func switchTo(_ stage: LiveStage, in snapshot: Snapshot) {
+    ///
+    /// Pinned windows in the stage being left come along (see `Pins`) unless `carryPins` is false.
+    static func switchTo(_ stage: LiveStage, in snapshot: Snapshot, carryPins: Bool = true) {
         guard stage.kind != .current, let id = FocusHistory.frontmost(of: stage.windowIDs) else { return }
+        let pinned = carryPins ? Pins.resolve(snapshot).filter { snapshot.current.contains($0) } : []
+        var frames: [CGWindowID: CGRect] = [:]
+        if !pinned.isEmpty {
+            // Bring the pinned windows to the front, first pin frontmost, so their previews are
+            // on top of the thumbnail this stage becomes.
+            for pin in pinned {
+                if let window = snapshot.windows[pin], let frame = AX.frame(window.element) { frames[pin] = frame }
+            }
+            for pin in pinned.reversed() {
+                if let window = snapshot.windows[pin] { AX.focus(window); usleep(120_000) }
+            }
+        }
         var snapshot = snapshot
-        for attempt in 1...3 {
+        var switched = false
+        for attempt in 1...3 where !switched {
             if attempt < 3, let window = snapshot.windows[id] {
                 AX.focus(window)
             } else if let strip = snapshot.stripItem(containing: id) {
@@ -379,12 +394,90 @@ enum Actions {
             for _ in 0..<8 {
                 usleep(80_000)
                 after = try? Snapshot.take()
-                if after?.current.contains(id) == true { return }
+                if after?.current.contains(id) == true { switched = true; break }
             }
             guard let after else { return }
-            Log.write("Stage switch attempt \(attempt) did not take.")
-            snapshot = after
+            if !switched {
+                Log.write("Stage switch attempt \(attempt) did not take.")
+                snapshot = after
+            }
         }
+        guard switched, !pinned.isEmpty else { return }
+        carry(pinned, frames: frames, thenFocus: id)
+    }
+
+    /// Brings pinned windows that are in other stages into the current stage: for each stage
+    /// holding pinned windows, switches to it (which brings a pinned window to the front),
+    /// then switches back, carrying the pinned windows as a StageKeeper switch does. Blocks for a
+    /// few seconds, so call it off the main thread.
+    static func fetchPinned() throws {
+        var snapshot = try Snapshot.take()
+        guard let home = frontWindow(snapshot) else { throw StageError.other("There is no current stage to fetch into.") }
+        let away = Pins.resolve(snapshot).filter { !snapshot.current.contains($0) && snapshot.stripItem(containing: $0) != nil }
+        guard !away.isEmpty else { throw StageError.other("No pinned windows are in other stages on this desktop.") }
+        var done = Set<CGWindowID>()
+        for pin in away where !done.contains(pin) {
+            guard let window = snapshot.windows[pin] else { continue }
+            AX.focus(window)
+            var there = false
+            for _ in 0..<15 {
+                usleep(100_000)
+                snapshot = try Snapshot.take()
+                if snapshot.current.contains(pin) && !snapshot.current.contains(home) { there = true; break }
+            }
+            guard there, let back = snapshot.stages.first(where: { $0.windowIDs.contains(home) }) else {
+                throw StageError.other("Could not go to the \(window.appName) window's stage.")
+            }
+            done.formUnion(snapshot.current)
+            switchTo(back, in: snapshot)
+            snapshot = try Snapshot.take()
+        }
+        let missing = Pins.resolve(snapshot).filter { away.contains($0) && !snapshot.current.contains($0) }
+        if !missing.isEmpty { throw StageError.other("Some pinned windows did not come. See the log.") }
+    }
+
+    /// Drags pinned windows from the stage just left into the current one, puts each back at its
+    /// position and size, and returns focus to `focus`.
+    private static func carry(_ pinned: [CGWindowID], frames: [CGWindowID: CGRect], thenFocus focus: CGWindowID) {
+        // While Stage Manager animates the switch, the windows left behind still read as current.
+        guard var after = try? Snapshot.take() else { return }
+        for _ in 0..<18 where pinned.contains(where: after.current.contains) {
+            usleep(100_000)
+            guard let next = try? Snapshot.take() else { return }
+            after = next
+        }
+        for pin in pinned {
+            guard let window = after.windows[pin], after.stripItem(containing: pin) != nil else { continue }
+            guard StripClick.dragIntoCurrent(window) else {
+                Log.write("The pinned \(window.appName) window stayed behind: its preview was not found.")
+                continue
+            }
+            var arrived = false
+            for _ in 0..<10 {
+                usleep(100_000)
+                guard let next = try? Snapshot.take() else { break }
+                after = next
+                if next.current.contains(pin) { arrived = true; break }
+            }
+            if arrived, let frame = frames[pin], let element = after.windows[pin]?.element {
+                AX.setFrame(element, frame)
+            } else if !arrived {
+                Log.write("The pinned \(window.appName) window stayed behind.")
+            }
+        }
+        if let window = (try? Snapshot.take())?.windows[focus] { AX.focus(window) }
+    }
+
+    /// The window you are working in: the focused window of the frontmost app when it is in the
+    /// current stage, else the current stage's front window by window order. Window order alone
+    /// can pick a window that shows on every stage, such as Outlook's reminders.
+    static func frontWindow(_ snapshot: Snapshot) -> CGWindowID? {
+        let current = Set(snapshot.current)
+        let focused = NSWorkspace.shared.frontmostApplication.flatMap { app -> CGWindowID? in
+            guard let element = AX.value(AX.application(app.processIdentifier), kAXFocusedWindowAttribute) else { return nil }
+            return AX.windowID(element as! AXUIElement)
+        }
+        return focused.flatMap { current.contains($0) ? $0 : nil } ?? Snapshot.zOrder().first(where: current.contains)
     }
 
     /// Moves the front window of the current stage into the stage holding `targetWindow`:
@@ -393,22 +486,16 @@ enum Actions {
     static func moveFrontWindow(toStageWith targetWindow: CGWindowID) throws {
         let started = Date()
         let snapshot = try Snapshot.take()
-        let current = Set(snapshot.current)
-        // The focused window of the app you are working in. Window order alone can pick a
-        // window that shows on every stage, such as Outlook's reminders.
-        let focused = NSWorkspace.shared.frontmostApplication.flatMap { app -> CGWindowID? in
-            guard let element = AX.value(AX.application(app.processIdentifier), kAXFocusedWindowAttribute) else { return nil }
-            return AX.windowID(element as! AXUIElement)
-        }
-        guard let front = focused.flatMap({ current.contains($0) ? $0 : nil }) ?? Snapshot.zOrder().first(where: current.contains),
-              let name = snapshot.windows[front]?.appName else {
+        guard let front = frontWindow(snapshot), let name = snapshot.windows[front]?.appName else {
             throw StageError.other("The current stage has no window to move.")
         }
-        Log.write("Moving the \(name) window \"\(snapshot.windows[front]?.title ?? "")\" (\(focused == front ? "focused" : "front by window order")).")
+        Log.write("Moving the \(name) window \"\(snapshot.windows[front]?.title ?? "")\".")
+        // A dropped preview lands where it is dropped; the window goes back here afterwards.
+        let originalFrame = snapshot.windows[front].flatMap { AX.frame($0.element) }
         guard let target = snapshot.stages.first(where: { $0.windowIDs.contains(targetWindow) }), target.kind != .current else {
             throw StageError.other("That stage is no longer open.")
         }
-        switchTo(target, in: snapshot)
+        switchTo(target, in: snapshot, carryPins: false)
         // While Stage Manager animates the switch, the old stage's windows are still on screen
         // and read as current. Wait for the window to reach the strip.
         var after = try Snapshot.take()
@@ -432,6 +519,7 @@ enum Actions {
             if after.current.contains(front) { break }
         }
         guard after.current.contains(front) else { throw StageError.other("Stage Manager did not take the \(name) window.") }
+        if let originalFrame, let element = after.windows[front]?.element { AX.setFrame(element, originalFrame) }
         Log.write("Moved the \(name) window to another stage in \(String(format: "%.1f", Date().timeIntervalSince(started))) s.")
     }
 

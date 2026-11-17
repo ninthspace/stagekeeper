@@ -1,6 +1,6 @@
 # StageKeeper
 
-Saves your Stage Manager stages and rebuilds them when you log in. Each stage can have a label, shown in the menu bar while that stage is current.
+Saves your Stage Manager stages and rebuilds them when you log in. Each stage can have a label and a colour. The menu bar shows the current stage's colour and label, the desktop takes the stage's colour, and labelled stages get keyboard shortcuts and Dock apps that switch to them.
 
 macOS does not save Stage Manager groupings across a restart and has no API for setting them. StageKeeper reads the stages from Stage Manager's accessibility tree and rebuilds them by clicking and shift-clicking the strip thumbnails.
 
@@ -16,7 +16,7 @@ This builds the tool and installs:
 - `~/.local/bin/stagekeeper`: the command-line tool, a link to the binary inside the app.
 - `~/Library/LaunchAgents/local.stagekeeper.plist`: opens the app at login.
 
-When the menu-bar item says "Needs Accessibility", allow StageKeeper in System Settings › Privacy & Security › Accessibility. The install is signed ad hoc, so each reinstall changes the code hash and macOS asks again. Turn the old entry off and on, or remove it and add it again. To avoid this, set `SIGN_IDENTITY` to a code-signing certificate before installing.
+When the menu-bar item says "Needs Accessibility", allow StageKeeper in System Settings › Privacy & Security › Accessibility. Without a certificate the install is signed ad hoc, so each reinstall changes the code hash and macOS asks again: remove the old entry and add the app again. To keep the permission across reinstalls, run `./scripts/make-signing-cert.sh` once. It creates a self-signed certificate, "StageKeeper Local Signing", in your login keychain, and `install.sh` signs with it from then on. To use a different certificate, set `SIGN_IDENTITY`.
 
 To remove it, run `./scripts/uninstall.sh`. The saved layout is kept.
 
@@ -30,6 +30,25 @@ At login the app waits 10 seconds, opens any saved app that is not running, wait
 
 The menu lists every stage by its label (or by its apps when it has no label). Choose one to switch to it.
 
+### Colours
+
+Switch to a stage and choose a colour from **Colour Current Stage**. While that stage is current:
+
+- the menu bar shows a dot in that colour before the label (a stage with no label shows its app names);
+- every screen's wallpaper is that colour.
+
+On a stage with no colour, and when StageKeeper quits, your own wallpaper comes back. StageKeeper records it the first time it sets a colour; if you change your wallpaper while on a stage with no colour, it records the new one.
+
+### Keyboard shortcuts
+
+Labelled stages get ⌃⌥1 to ⌃⌥9, in alphabetical order of label. The menu shows each stage's shortcut. Adding, removing or renaming a label can change the numbers. A shortcut does nothing when its stage has no open windows. macOS has no shortcuts of its own for switching to a particular stage.
+
+### Dock apps
+
+Each labelled stage has a small app in `~/Applications/StageKeeper Stages`, named after the label, with an icon in the stage's colour. Drag one to the Dock; clicking it switches to that stage. **Show Dock Apps** opens the folder.
+
+Each app finds its stage by an ID, not by the label. Renaming a stage renames its app in the same place, so a Dock item for it keeps working. Removing a label deletes the app.
+
 ### Command line
 
 The command-line tool needs Accessibility permission for the terminal that runs it.
@@ -39,13 +58,17 @@ stagekeeper save                Save every stage (labels are kept).
 stagekeeper restore [--wait N]  Open saved apps and rebuild the stages.
 stagekeeper list                Show the current stages and their labels.
 stagekeeper label "<name>"      Label the current stage ("" removes the label).
+stagekeeper colour <colour>     Colour the current stage: a palette name, #RRGGBB, or none.
+stagekeeper switch <label|n>    Switch to a labelled stage by label or shortcut number.
 stagekeeper agent               Run the menu-bar item.
 ```
 
 ## Files
 
 - Layout: `~/Library/Application Support/StageKeeper/layout.json`. The previous save is in `layout.previous.json`.
-- Agent state (the boot it last restored): `state.json` in the same folder.
+- Agent state (the boot it last restored, and your own wallpaper for each screen): `state.json` in the same folder.
+- Colour wallpapers: `Wallpapers/` in the same folder.
+- Dock apps: `~/Applications/StageKeeper Stages`. `uninstall.sh` removes them.
 - Log: `~/Library/Logs/StageKeeper.log`.
 
 ## How it works

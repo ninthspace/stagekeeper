@@ -8,6 +8,9 @@ Usage:
   stagekeeper restore [--wait N] Open saved apps and rebuild the stages (waits up to N s, default 90, for windows).
   stagekeeper list              Show the current stages and their labels.
   stagekeeper label "<name>"    Label the current stage ("" removes the label).
+  stagekeeper colour <colour>   Colour the current stage: a name (\(Palette.colours.map(\.name).joined(separator: ", "))),
+                                #RRGGBB, or none.
+  stagekeeper switch <label|n>  Switch to a labelled stage by label or shortcut number (asks the menu-bar app).
   stagekeeper agent             Run the menu-bar item; restores once per boot.
 
 Layout file: \(Paths.layout.path)
@@ -41,6 +44,23 @@ case "list":
 case "label":
     guard args.count >= 2 else { print(usage); exit(2) }
     runCLI { try Actions.labelCurrent(args.dropFirst().joined(separator: " ")) }
+case "colour", "color":
+    guard args.count == 2 else { print(usage); exit(2) }
+    runCLI {
+        if args[1].lowercased() == "none" { return try Actions.colourCurrent(nil) }
+        guard let hex = Palette.resolve(args[1]) else { throw StageError.other("Unknown colour \(args[1]).") }
+        try Actions.colourCurrent(hex)
+    }
+case "switch":
+    guard args.count >= 2 else { print(usage); exit(2) }
+    runCLI {
+        let query = args.dropFirst().joined(separator: " ")
+        guard let stage = Actions.find(query, in: LayoutStore.load()), let id = stage.id else {
+            throw StageError.other("No labelled stage \"\(query)\".")
+        }
+        // The menu-bar app does the switch, so only it needs Accessibility permission.
+        NSWorkspace.shared.open(URL(string: "stagekeeper://switch/\(id.uuidString)")!)
+    }
 case "agent":
     Log.echo = false
     let app = NSApplication.shared

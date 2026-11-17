@@ -2,6 +2,8 @@ import AppKit
 
 struct AgentState: Codable {
     var lastRestoredBoot: Date?
+    /// The user's own wallpaper per screen, put back on stages without a colour.
+    var originalWallpapers: [String: String]?
 
     static func load() -> AgentState {
         guard let data = try? Data(contentsOf: Paths.state) else { return AgentState() }
@@ -15,8 +17,9 @@ struct AgentState: Codable {
     }
 }
 
-/// Menu-bar item showing the current stage's label, with save, restore, label and switch.
-/// Restores the saved layout once per boot when it starts.
+/// Menu-bar item showing the current stage's colour and label, with save, restore, label,
+/// colour and switch. Handles ⌃⌥1–9 and the stagekeeper://switch/<id> links the Dock apps
+/// open. Restores the saved layout once per boot when it starts.
 final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var item: NSStatusItem!
     private var busy = false
@@ -24,14 +27,15 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName: "rectangle.stack", accessibilityDescription: "StageKeeper")
+        item.button?.image = Self.symbol
         item.button?.imagePosition = .imageLeading
         let menu = NSMenu()
         menu.delegate = self
         item.menu = menu
 
         NSWorkspace.shared.notificationCenter.addObserver(
-            self, selector: #selector(refreshTitle), name: NSWorkspace.didActivateApplicationNotification, object: nil)
+            self, selector: #selector(appActivated), name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        Hotkeys.handler = { [weak self] number in self?.switchToNumber(number) }
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refreshTitle() }
 
         if !AX.isTrusted(prompt: true) {
@@ -48,7 +52,20 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        Wallpaper.apply(nil)
+    }
+
+    /// Links from the Dock apps: stagekeeper://switch/<stage id>.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.scheme == "stagekeeper" && url.host == "switch" {
+            guard let id = UUID(uuidString: url.lastPathComponent) else { continue }
+            perform { try Actions.switchTo(id: id) }
+        }
+    }
+
     private func start() {
+        if let layout = LayoutStore.load() { DockApps.sync(layout) }
         refreshTitle()
         var state = AgentState.load()
         guard !System.sameBoot(state.lastRestoredBoot), LayoutStore.load() != nil else { return }
@@ -58,12 +75,41 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in self?.restore() }
     }
 
+    private static let symbol = NSImage(systemSymbolName: "rectangle.stack", accessibilityDescription: "StageKeeper")
+
+    /// A stage switch activates an app before Stage Manager finishes moving the windows,
+    /// so read the stages again once the animation is over.
+    @objc private func appActivated() {
+        refreshTitle()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.refreshTitle() }
+    }
+
+    /// Updates the menu-bar title, the wallpaper and the registered shortcuts.
     @objc private func refreshTitle() {
         guard !busy, let button = item.button else { return }
-        guard let snapshot = try? Snapshot.take() else { button.title = ""; return }
-        let labels = Matcher.labels(LayoutStore.load(), snapshot)
-        let label = snapshot.stages.firstIndex { $0.kind == .current }.flatMap { labels[$0] }
-        button.title = label.map { " \($0)" } ?? ""
+        let layout = LayoutStore.load()
+        Hotkeys.register(count: Actions.numbered(layout).count)
+        guard let snapshot = try? Snapshot.take() else {
+            button.title = ""
+            button.image = Self.symbol
+            return
+        }
+        let indices = Matcher.savedIndices(layout, snapshot)
+        let currentIndex = snapshot.stages.firstIndex { $0.kind == .current }
+        let saved = currentIndex.flatMap { indices[$0] }.flatMap { layout?.stages[$0] }
+        let name = saved?.label ?? currentIndex.map { appNames(snapshot.stages[$0], snapshot) } ?? ""
+        button.title = name.isEmpty ? "" : " \(Self.truncate(name))"
+        button.image = saved?.color.map { Palette.dot($0) } ?? Self.symbol
+        Wallpaper.apply(saved?.color)
+    }
+
+    private func appNames(_ stage: LiveStage, _ snapshot: Snapshot) -> String {
+        let apps = stage.windowIDs.compactMap { snapshot.windows[$0]?.appName }
+        return apps.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }.joined(separator: ", ")
+    }
+
+    private static func truncate(_ text: String, to limit: Int = 32) -> String {
+        text.count <= limit ? text : String(text.prefix(limit - 1)) + "…"
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -73,24 +119,51 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let layout = LayoutStore.load()
-        if let snapshot = try? Snapshot.take() {
-            let labels = Matcher.labels(layout, snapshot)
+        var currentColour: String?
+        switch Result(catching: { try Snapshot.take() }) {
+        case .success(let snapshot):
+            let indices = Matcher.savedIndices(layout, snapshot)
+            let numbers = Dictionary(uniqueKeysWithValues: Actions.numbered(layout).prefix(9).enumerated().map { ($1.id!, $0 + 1) })
             for (index, stage) in snapshot.stages.enumerated() {
-                let apps = stage.windowIDs.compactMap { snapshot.windows[$0]?.appName }
-                let unique = apps.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
-                let name = labels[index] ?? unique.joined(separator: ", ")
-                let entry = NSMenuItem(title: name, action: #selector(switchStage(_:)), keyEquivalent: "")
+                let saved = indices[index].flatMap { layout?.stages[$0] }
+                let apps = appNames(stage, snapshot)
+                let entry = NSMenuItem(title: saved?.label ?? apps, action: #selector(switchStage(_:)), keyEquivalent: "")
                 entry.target = self
                 entry.representedObject = stage.windowIDs.first.map { NSNumber(value: $0) }
-                entry.toolTip = unique.joined(separator: ", ")
-                if stage.kind == .current { entry.state = .on }
+                entry.toolTip = apps
+                if let id = saved?.id, let number = numbers[id] {
+                    entry.keyEquivalent = String(number)
+                    entry.keyEquivalentModifierMask = Hotkeys.modifiers
+                }
+                if let colour = saved?.color { entry.image = Palette.dot(colour) }
+                if stage.kind == .current {
+                    entry.state = .on
+                    currentColour = saved?.color
+                }
                 menu.addItem(entry)
             }
-        } else {
-            menu.addItem(withTitle: "Stage Manager is off or permission is missing", action: nil, keyEquivalent: "")
+        case .failure(let error):
+            menu.addItem(withTitle: "\(error)", action: nil, keyEquivalent: "")
         }
         menu.addItem(.separator())
         add(menu, "Label Current Stage…", #selector(labelCurrent), "l")
+        let colours = NSMenu()
+        for (name, hex) in Palette.colours {
+            let entry = NSMenuItem(title: name, action: #selector(colourCurrent(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = hex
+            entry.image = Palette.dot(hex)
+            entry.state = currentColour == hex ? .on : .off
+            colours.addItem(entry)
+        }
+        colours.addItem(.separator())
+        let none = NSMenuItem(title: "None", action: #selector(colourCurrent(_:)), keyEquivalent: "")
+        none.target = self
+        none.state = currentColour == nil ? .on : .off
+        colours.addItem(none)
+        let colourItem = NSMenuItem(title: "Colour Current Stage", action: nil, keyEquivalent: "")
+        colourItem.submenu = colours
+        menu.addItem(colourItem)
         add(menu, "Save Layout", #selector(saveLayout), "s")
         add(menu, "Restore Layout", #selector(restoreLayout), "r")
         if let layout {
@@ -98,6 +171,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(withTitle: "Saved \(saved)", action: nil, keyEquivalent: "")
         }
         add(menu, "Show Layout File", #selector(showFile), "")
+        add(menu, "Show Dock Apps", #selector(showDockApps), "")
         menu.addItem(.separator())
         add(menu, "Quit StageKeeper", #selector(NSApplication.terminate(_:)), "q", target: NSApp)
     }
@@ -109,13 +183,41 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func switchStage(_ sender: NSMenuItem) {
-        guard let id = (sender.representedObject as? NSNumber)?.uint32Value, let snapshot = try? Snapshot.take() else { return }
-        if let strip = snapshot.stripItem(containing: id) {
-            StripClick.click(strip.button, shift: false)
-        } else if let window = snapshot.windows[id] {
-            AX.perform(window.element, kAXRaiseAction)
-            NSRunningApplication(processIdentifier: window.pid)?.activate()
+        guard let id = (sender.representedObject as? NSNumber)?.uint32Value else { return }
+        perform {
+            let snapshot = try Snapshot.take()
+            guard let stage = snapshot.stages.first(where: { $0.windowIDs.contains(id) }) else { return }
+            Actions.switchTo(stage, in: snapshot)
         }
+    }
+
+    private func switchToNumber(_ number: Int) {
+        let list = Actions.numbered(LayoutStore.load())
+        guard number >= 1, number <= list.count, let id = list[number - 1].id else { return }
+        perform { try Actions.switchTo(id: id) }
+    }
+
+    /// Runs a switch off the main thread (strip clicks sleep between mouse events), then
+    /// refreshes the title and reports any error.
+    private func perform(_ body: @escaping () throws -> Void) {
+        guard !busy else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            var failure: Error?
+            do { try body() } catch { failure = error }
+            DispatchQueue.main.async {
+                if let failure { self.notify("\(failure)") }
+                self.appActivated()
+            }
+        }
+    }
+
+    @objc private func colourCurrent(_ sender: NSMenuItem) {
+        do { try Actions.colourCurrent(sender.representedObject as? String); refreshTitle() } catch { notify("\(error)") }
+    }
+
+    @objc private func showDockApps() {
+        if let layout = LayoutStore.load() { DockApps.sync(layout) }
+        NSWorkspace.shared.open(Paths.dockApps)
     }
 
     @objc private func saveLayout() {

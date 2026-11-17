@@ -7,11 +7,12 @@ enum DockApps {
     private static let idKey = "StageKeeperStageID"
     private static let colourKey = "StageKeeperColor"
 
-    static func sync(_ layout: Layout) {
+    /// Creates, renames and updates the apps for the labelled stages on every desktop.
+    static func sync() {
         let fm = FileManager.default
         try? fm.createDirectory(at: Paths.dockApps, withIntermediateDirectories: true)
         let existing = installed()
-        for stage in layout.stages {
+        for stage in LayoutStore.loadAll().flatMap(\.stages) {
             guard let id = stage.id, let label = stage.label else { continue }
             let target = Paths.dockApps.appendingPathComponent(fileName(label) + ".app")
             var app = existing[id]

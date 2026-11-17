@@ -47,17 +47,22 @@ enum Palette {
 }
 
 /// Sets every screen's wallpaper to the current stage's colour, and puts the user's own
-/// wallpaper back on stages without a colour and when the app quits.
+/// wallpaper back on stages without a colour and when the app quits. macOS sets a wallpaper
+/// for the desktop showing on each screen, so the user's own wallpaper is kept per screen and
+/// desktop.
 enum Wallpaper {
-    private static var lastApplied: String??
+    private static var lastApplied: String?
 
     static func apply(_ hex: String?) {
-        if lastApplied == .some(hex) { return }
-        lastApplied = .some(hex)
+        let desktop = Desktops.current().key
+        let applied = "\(desktop)|\(hex ?? "none")"
+        if lastApplied == applied { return }
+        lastApplied = applied
         var state = AgentState.load()
         let workspace = NSWorkspace.shared
         for screen in NSScreen.screens {
-            let key = screenKey(screen)
+            let screenID = screenKey(screen)
+            let key = "\(screenID)@\(desktop)"
             let current = workspace.desktopImageURL(for: screen)
             let currentIsOurs = current.map(isOurs) ?? false
             if let hex {
@@ -70,7 +75,7 @@ enum Wallpaper {
                 ]
                 do { try workspace.setDesktopImageURL(url, for: screen, options: options) }
                 catch { Log.write("Could not set wallpaper: \(error)") }
-            } else if currentIsOurs, let saved = state.originalWallpapers?[key], let url = URL(string: saved) {
+            } else if currentIsOurs, let saved = state.originalWallpapers?[key] ?? state.originalWallpapers?[screenID], let url = URL(string: saved) {
                 do { try workspace.setDesktopImageURL(url, for: screen, options: [:]) }
                 catch { Log.write("Could not restore wallpaper \(saved): \(error)") }
             }

@@ -1,7 +1,10 @@
 import AppKit
 
 struct AgentState: Codable {
+    /// The boot `restoredDesktops` belongs to.
     var lastRestoredBoot: Date?
+    /// Desktops whose layout has been restored (or deliberately skipped) during that boot.
+    var restoredDesktops: [String]?
     /// The user's own wallpaper per screen, put back on stages without a colour.
     var originalWallpapers: [String: String]?
 
@@ -35,6 +38,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(appActivated), name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(desktopChanged), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         Hotkeys.handler = { [weak self] number in self?.switchToNumber(number) }
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refreshTitle() }
 
@@ -64,15 +69,41 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private var started = false
+
     private func start() {
-        if let layout = LayoutStore.load() { DockApps.sync(layout) }
+        started = true
+        DockApps.sync()
         refreshTitle()
         var state = AgentState.load()
-        guard !System.sameBoot(state.lastRestoredBoot), LayoutStore.load() != nil else { return }
-        state.lastRestoredBoot = System.bootTime
-        state.write()
+        if !System.sameBoot(state.lastRestoredBoot) {
+            state.lastRestoredBoot = System.bootTime
+            state.restoredDesktops = []
+            state.write()
+        }
         // Give login items time to open their windows before rearranging.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in self?.restore() }
+        restoreDesktopOnce(after: 10)
+    }
+
+    @objc private func desktopChanged() {
+        appActivated()
+        guard started else { return }
+        restoreDesktopOnce(after: 1.5)
+    }
+
+    /// Restores the showing desktop's layout the first time it is shown in each boot. Stage
+    /// Manager only exposes the stages of the desktop that is showing, so each desktop is
+    /// restored when you first go to it.
+    private func restoreDesktopOnce(after delay: Double) {
+        let desktop = Desktops.current().key
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, Desktops.current().key == desktop, LayoutStore.load(desktop) != nil else { return }
+            var state = AgentState.load()
+            guard System.sameBoot(state.lastRestoredBoot), !(state.restoredDesktops ?? []).contains(desktop) else { return }
+            state.restoredDesktops = (state.restoredDesktops ?? []) + [desktop]
+            state.write()
+            self.restore()
+        }
     }
 
     private static let symbol = NSImage(systemSymbolName: "rectangle.stack", accessibilityDescription: "StageKeeper")
@@ -88,7 +119,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func refreshTitle() {
         guard !busy, let button = item.button else { return }
         let layout = LayoutStore.load()
-        Hotkeys.register(count: Actions.numbered(layout).count)
+        Hotkeys.register(count: Actions.numbered().count)
         guard let snapshot = try? Snapshot.take() else {
             button.title = ""
             button.image = Self.symbol
@@ -120,11 +151,17 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let layout = LayoutStore.load()
+        let numbered = Actions.numbered()
+        let numbers = Dictionary(uniqueKeysWithValues: numbered.prefix(9).enumerated().map { ($1.id!, $0 + 1) })
+        let desktops = Desktops.all()
+        let desktop = Desktops.current()
+        if desktops.count > 1 {
+            menu.addItem(withTitle: "Desktop \(desktop.number)", action: nil, keyEquivalent: "")
+        }
         var currentColour: String?
         switch Result(catching: { try Snapshot.take() }) {
         case .success(let snapshot):
             let indices = Matcher.savedIndices(layout, snapshot)
-            let numbers = Dictionary(uniqueKeysWithValues: Actions.numbered(layout).prefix(9).enumerated().map { ($1.id!, $0 + 1) })
             for (index, stage) in snapshot.stages.enumerated() {
                 let saved = indices[index].flatMap { layout?.stages[$0] }
                 let apps = appNames(stage, snapshot)
@@ -145,6 +182,25 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         case .failure(let error):
             menu.addItem(withTitle: "\(error)", action: nil, keyEquivalent: "")
+        }
+        // Labelled stages on other desktops, which Stage Manager does not show from here.
+        for other in LayoutStore.loadAll() where other.desktop != desktop.key {
+            let stages = other.stages.filter { $0.label != nil && $0.id != nil }
+            guard !stages.isEmpty else { continue }
+            menu.addItem(.separator())
+            let number = desktops.first { $0.key == other.desktop }?.number
+            menu.addItem(withTitle: number.map { "Desktop \($0)" } ?? "Removed desktop", action: nil, keyEquivalent: "")
+            for stage in stages {
+                let entry = NSMenuItem(title: stage.label!, action: #selector(switchSaved(_:)), keyEquivalent: "")
+                entry.target = self
+                entry.representedObject = stage.id!.uuidString
+                if let n = numbers[stage.id!] {
+                    entry.keyEquivalent = String(n)
+                    entry.keyEquivalentModifierMask = Hotkeys.modifiers
+                }
+                if let colour = stage.color { entry.image = Palette.dot(colour) }
+                menu.addItem(entry)
+            }
         }
         menu.addItem(.separator())
         add(menu, "Label Current Stage…", #selector(labelCurrent), "l")
@@ -192,8 +248,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    @objc private func switchSaved(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let id = UUID(uuidString: raw) else { return }
+        perform { try Actions.switchTo(id: id) }
+    }
+
     private func switchToNumber(_ number: Int) {
-        let list = Actions.numbered(LayoutStore.load())
+        let list = Actions.numbered()
         guard number >= 1, number <= list.count, let id = list[number - 1].id else { return }
         perform { try Actions.switchTo(id: id) }
     }
@@ -217,7 +278,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func showDockApps() {
-        if let layout = LayoutStore.load() { DockApps.sync(layout) }
+        DockApps.sync()
         NSWorkspace.shared.open(Paths.dockApps)
     }
 
@@ -266,7 +327,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func showFile() {
-        NSWorkspace.shared.activateFileViewerSelecting([Paths.layout])
+        let file = Paths.layout
+        NSWorkspace.shared.activateFileViewerSelecting([FileManager.default.fileExists(atPath: file.path) ? file : Paths.desktops])
     }
 
     private func notify(_ message: String) {

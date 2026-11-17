@@ -4,16 +4,16 @@ let usage = """
 StageKeeper — save and restore Stage Manager stages.
 
 Usage:
-  stagekeeper save              Save every stage (labels are kept).
+  stagekeeper save              Save every stage on this desktop (labels are kept).
   stagekeeper restore [--wait N] Open saved apps and rebuild the stages (waits up to N s, default 90, for windows).
-  stagekeeper list              Show the current stages and their labels.
+  stagekeeper list              Show this desktop's stages and their labels.
   stagekeeper label "<name>"    Label the current stage ("" removes the label).
   stagekeeper colour <colour>   Colour the current stage: a name (\(Palette.colours.map(\.name).joined(separator: ", "))),
                                 #RRGGBB, or none.
   stagekeeper switch <label|n>  Switch to a labelled stage by label or shortcut number (asks the menu-bar app).
   stagekeeper agent             Run the menu-bar item; restores once per boot.
 
-Layout file: \(Paths.layout.path)
+Layouts:     \(Paths.desktops.path) (one file per desktop)
 Log:         \(Paths.log.path)
 """
 
@@ -55,7 +55,7 @@ case "switch":
     guard args.count >= 2 else { print(usage); exit(2) }
     runCLI {
         let query = args.dropFirst().joined(separator: " ")
-        guard let stage = Actions.find(query, in: LayoutStore.load()), let id = stage.id else {
+        guard let stage = Actions.find(query), let id = stage.id else {
             throw StageError.other("No labelled stage \"\(query)\".")
         }
         // The menu-bar app does the switch, so only it needs Accessibility permission.
@@ -72,6 +72,7 @@ case "skip-restore":
     // Used by install.sh so the first agent launch does not rearrange the current session.
     var state = AgentState.load()
     state.lastRestoredBoot = System.bootTime
+    state.restoredDesktops = Desktops.all().map(\.key)
     state.write()
 case "help", "-h", "--help":
     print(usage)

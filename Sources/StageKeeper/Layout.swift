@@ -36,6 +36,8 @@ struct Layout: Codable {
     var savedAt: Date
     var bootTime: Date?
     var stages: [SavedStage]
+    /// The desktop these stages are on (see `Desktops`). Set when the layout is loaded.
+    var desktop: String? = nil
 }
 
 enum Paths {
@@ -45,8 +47,19 @@ enum Paths {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
-    static let layout = directory.appendingPathComponent("layout.json")
-    static let previousLayout = directory.appendingPathComponent("layout.previous.json")
+    /// One layout file per desktop, named after the desktop's key.
+    static let desktops: URL = {
+        let url = directory.appendingPathComponent("Desktops", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }()
+    static func layout(for desktop: String) -> URL { desktops.appendingPathComponent("\(desktop).json") }
+    static func previousLayout(for desktop: String) -> URL { desktops.appendingPathComponent("\(desktop).previous.json") }
+    /// The layout file of the desktop showing now.
+    static var layout: URL { layout(for: Desktops.current().key) }
+    /// Before per-desktop layouts there was one file; it becomes the main desktop's layout.
+    static let legacyLayout = directory.appendingPathComponent("layout.json")
+    static let legacyPreviousLayout = directory.appendingPathComponent("layout.previous.json")
     static let state = directory.appendingPathComponent("state.json")
     static let wallpapers: URL = {
         let url = directory.appendingPathComponent("Wallpapers", isDirectory: true)
@@ -102,17 +115,44 @@ enum LayoutStore {
         return d
     }
 
-    static func load() -> Layout? {
-        guard let data = try? Data(contentsOf: Paths.layout) else { return nil }
-        return try? decoder.decode(Layout.self, from: data)
+    /// The layout of the desktop showing now.
+    static func load() -> Layout? { load(Desktops.current().key) }
+
+    static func load(_ desktop: String) -> Layout? {
+        migrateLegacy()
+        guard let data = try? Data(contentsOf: Paths.layout(for: desktop)),
+              var layout = try? decoder.decode(Layout.self, from: data) else { return nil }
+        layout.desktop = desktop
+        return layout
     }
 
+    /// Every desktop's layout, including desktops that no longer exist.
+    static func loadAll() -> [Layout] {
+        migrateLegacy()
+        let files = (try? FileManager.default.contentsOfDirectory(at: Paths.desktops, includingPropertiesForKeys: nil)) ?? []
+        return files.filter { $0.pathExtension == "json" && !$0.lastPathComponent.hasSuffix(".previous.json") }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .compactMap { load($0.deletingPathExtension().lastPathComponent) }
+    }
+
+    /// Writes to the layout's own desktop, or to the desktop showing now when it has none.
     static func write(_ layout: Layout, keepPrevious: Bool) throws {
-        if keepPrevious, FileManager.default.fileExists(atPath: Paths.layout.path) {
-            try? FileManager.default.removeItem(at: Paths.previousLayout)
-            try? FileManager.default.copyItem(at: Paths.layout, to: Paths.previousLayout)
+        let desktop = layout.desktop ?? Desktops.current().key
+        let url = Paths.layout(for: desktop)
+        if keepPrevious, FileManager.default.fileExists(atPath: url.path) {
+            let previous = Paths.previousLayout(for: desktop)
+            try? FileManager.default.removeItem(at: previous)
+            try? FileManager.default.copyItem(at: url, to: previous)
         }
-        try encoder.encode(layout).write(to: Paths.layout, options: .atomic)
+        try encoder.encode(layout).write(to: url, options: .atomic)
+    }
+
+    private static func migrateLegacy() {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: Paths.legacyLayout.path), !fm.fileExists(atPath: Paths.layout(for: "main").path) else { return }
+        try? fm.moveItem(at: Paths.legacyLayout, to: Paths.layout(for: "main"))
+        try? fm.moveItem(at: Paths.legacyPreviousLayout, to: Paths.previousLayout(for: "main"))
+        Log.write("Moved layout.json to Desktops/main.json.")
     }
 }
 
@@ -182,8 +222,9 @@ enum Actions {
     /// Captures every stage, carrying labels, colours and IDs over from the previous save.
     @discardableResult
     static func save() throws -> Layout {
+        let desktop = Desktops.current().key
         let snapshot = try Snapshot.take()
-        let previous = LayoutStore.load()
+        let previous = LayoutStore.load(desktop)
         let indices = Matcher.savedIndices(previous, snapshot)
         let stages = snapshot.stages.enumerated().map { index, stage in
             let old = indices[index].flatMap { previous?.stages[$0] }
@@ -199,7 +240,7 @@ enum Actions {
                 }
             )
         }
-        let layout = Layout(savedAt: Date(), bootTime: System.bootTime, stages: stages)
+        let layout = Layout(savedAt: Date(), bootTime: System.bootTime, stages: stages, desktop: desktop)
         try LayoutStore.write(layout, keepPrevious: true)
         Log.write("Saved \(stages.count) stages, \(snapshot.windows.count) windows.")
         return layout
@@ -214,7 +255,7 @@ enum Actions {
         if layout.stages[index].id == nil { layout.stages[index].id = UUID() }
         change(&layout.stages[index])
         try LayoutStore.write(layout, keepPrevious: false)
-        DockApps.sync(layout)
+        DockApps.sync()
         return layout.stages[index]
     }
 
@@ -232,25 +273,93 @@ enum Actions {
         Log.write(hex.map { "Coloured current stage \($0)." } ?? "Cleared current stage colour.")
     }
 
-    /// Labelled stages in shortcut order: alphabetical by label. The first nine get ⌃⌥1–9.
-    static func numbered(_ layout: Layout?) -> [SavedStage] {
-        (layout?.stages ?? []).filter { $0.label != nil && $0.id != nil }
-            .sorted { $0.label!.localizedStandardCompare($1.label!) == .orderedAscending }
+    /// Labelled stages in shortcut order: desktop by desktop, alphabetical by label within a
+    /// desktop, so labelling a stage on one desktop does not renumber another desktop's stages.
+    /// The first nine get ⌃⌥1–9.
+    static func numbered() -> [SavedStage] {
+        let order = Dictionary(uniqueKeysWithValues: Desktops.all().enumerated().map { ($1.key, $0) })
+        let layouts = LayoutStore.loadAll().sorted { (order[$0.desktop ?? ""] ?? .max) < (order[$1.desktop ?? ""] ?? .max) }
+        return layouts.flatMap { layout in
+            layout.stages.filter { $0.label != nil && $0.id != nil }
+                .sorted { $0.label!.localizedStandardCompare($1.label!) == .orderedAscending }
+        }
     }
 
-    /// Switches to the live stage that matches a saved stage. Blocks for about a second
-    /// while it clicks the strip, so call it off the main thread.
+    /// The layout and index of a saved stage, on any desktop.
+    static func locate(_ id: UUID) -> (layout: Layout, index: Int)? {
+        for layout in LayoutStore.loadAll() {
+            if let index = layout.stages.firstIndex(where: { $0.id == id }) { return (layout, index) }
+        }
+        return nil
+    }
+
+    /// Switches to the live stage that matches a saved stage, moving to its desktop first when
+    /// it is on another one. Blocks for a second or more, so call it off the main thread.
     static func switchTo(id: UUID) throws {
-        guard let layout = LayoutStore.load(), let saved = layout.stages.firstIndex(where: { $0.id == id }) else {
+        guard let (layout, saved) = locate(id) else {
             throw StageError.other("That stage is no longer in the saved layout.")
         }
-        let snapshot = try Snapshot.take()
-        let indices = Matcher.savedIndices(layout, snapshot)
-        guard let live = indices.firstIndex(of: saved) else {
-            let name = layout.stages[saved].label ?? "That stage"
-            throw StageError.other("\(name) has no open windows.")
+        let stage = layout.stages[saved]
+        let name = stage.label ?? "That stage"
+        if let desktop = layout.desktop, desktop != Desktops.current().key {
+            try moveToDesktop(desktop, for: stage)
         }
+        // After a desktop change the apps take a moment to report their windows.
+        var live: Int?
+        var snapshot = try Snapshot.take()
+        for _ in 0..<6 {
+            live = Matcher.savedIndices(layout, snapshot).firstIndex(of: saved)
+            if live != nil { break }
+            usleep(250_000)
+            snapshot = try Snapshot.take()
+        }
+        guard let live else { throw StageError.other("\(name) has no open windows.") }
         switchTo(snapshot.stages[live], in: snapshot)
+    }
+
+    /// Moves to another desktop. Presses Mission Control's "Switch to Desktop N" shortcut when it
+    /// is turned on; otherwise ⌃← or ⌃→ ("Move left/right a space", on by default) once per
+    /// desktop between here and there. Failing that, activates an app from the stage, which
+    /// macOS follows to a desktop where the app has windows unless it also has windows here.
+    private static func moveToDesktop(_ desktop: String, for stage: SavedStage) throws {
+        let name = stage.label ?? "That stage"
+        let place = Desktops.number(of: desktop).map { "Desktop \($0)" } ?? "another desktop"
+        let all = Desktops.all()
+        if let from = all.firstIndex(where: { $0.key == Desktops.current().key }),
+           let to = all.firstIndex(where: { $0.key == desktop }) {
+            let source = CGEventSource(stateID: .hidSystemState)
+            func press(_ key: CGKeyCode, _ flags: CGEventFlags) {
+                for down in [true, false] {
+                    let event = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: down)
+                    event?.flags = flags
+                    event?.post(tap: .cghidEventTap)
+                }
+            }
+            if let shortcut = Desktops.switchShortcut(toDesktop: all[to].number) {
+                press(shortcut.key, shortcut.flags)
+            } else {
+                let key: CGKeyCode = to > from ? 124 : 123  // right or left arrow
+                for _ in 0..<abs(to - from) {
+                    press(key, [.maskControl, .maskSecondaryFn, .maskNumericPad])
+                    usleep(350_000)
+                }
+            }
+            for _ in 0..<8 {
+                if Desktops.current().key == desktop { usleep(400_000); return }
+                usleep(250_000)
+            }
+            Log.write("The desktop shortcut did not reach \(place).")
+        }
+        let bundles = stage.windows.map(\.bundleID).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+        for bundle in bundles {
+            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else { continue }
+            app.activate(from: NSRunningApplication.current, options: [.activateAllWindows])
+            for _ in 0..<8 {
+                usleep(250_000)
+                if Desktops.current().key == desktop { return }
+            }
+        }
+        throw StageError.other("\(name) is on \(place). Switch to that desktop first.")
     }
 
     /// Switches to a live stage by focusing one of its windows, which Stage Manager follows.
@@ -274,8 +383,8 @@ enum Actions {
     }
 
     /// Finds a labelled stage by shortcut number (1-based) or by label, ignoring case.
-    static func find(_ query: String, in layout: Layout?) -> SavedStage? {
-        let list = numbered(layout)
+    static func find(_ query: String) -> SavedStage? {
+        let list = numbered()
         if let n = Int(query), n >= 1, n <= list.count { return list[n - 1] }
         return list.first { $0.label!.caseInsensitiveCompare(query) == .orderedSame }
     }
@@ -283,7 +392,8 @@ enum Actions {
     static func describe() throws -> String {
         let snapshot = try Snapshot.take()
         let labels = Matcher.labels(LayoutStore.load(), snapshot)
-        var lines: [String] = []
+        let desktop = Desktops.current()
+        var lines = ["Desktop \(desktop.number) of \(max(Desktops.all().count, 1)) (\(desktop.key))"]
         for (index, stage) in snapshot.stages.enumerated() {
             let name = labels[index].map { "\"\($0)\"" } ?? "(no label)"
             lines.append("\(stage.kind.rawValue.padding(toLength: 8, withPad: " ", startingAt: 0)) \(name)")

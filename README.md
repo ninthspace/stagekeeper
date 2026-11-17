@@ -30,6 +30,16 @@ At login the app waits 10 seconds, opens any saved app that is not running, wait
 
 The menu lists every stage by its label (or by its apps when it has no label). Choose one to switch to it.
 
+### Desktops
+
+Stage Manager keeps separate stages on each desktop, and only shows the stages of the desktop you are on. StageKeeper keeps one saved layout per desktop:
+
+- **Save Layout** saves the stages of the desktop you are on and leaves the other desktops' layouts alone.
+- At login StageKeeper restores the desktop that is showing. Each other desktop is restored the first time you go to it after a restart.
+- The menu lists the stages of the desktop you are on, then the labelled stages of your other desktops under "Desktop 2" and so on.
+- Shortcuts and Dock apps work for stages on any desktop. For a stage on another desktop, StageKeeper presses that desktop's "Switch to Desktop N" shortcut when you have turned it on (System Settings › Keyboard › Keyboard Shortcuts › Mission Control), and otherwise ⌃← or ⌃→ ("Move left a space" / "Move right a space" in the same place, on by default) until that desktop shows. If those shortcuts are off, it activates one of the stage's apps instead, which only moves desktops when the app has no windows on the desktop you are on; otherwise StageKeeper says which desktop the stage is on.
+- Each desktop can have its own wallpaper; StageKeeper remembers your own wallpaper for each desktop.
+
 ### Colours
 
 Switch to a stage and choose a colour from **Colour Current Stage**. While that stage is current:
@@ -41,7 +51,7 @@ On a stage with no colour, and when StageKeeper quits, your own wallpaper comes 
 
 ### Keyboard shortcuts
 
-Labelled stages get ⌃⌥1 to ⌃⌥9, in alphabetical order of label. The menu shows each stage's shortcut. Adding, removing or renaming a label can change the numbers. A shortcut does nothing when its stage has no open windows. macOS has no shortcuts of its own for switching to a particular stage.
+Labelled stages get ⌃⌥1 to ⌃⌥9: desktop 1's labelled stages first, in alphabetical order of label, then desktop 2's, and so on. The menu shows each stage's shortcut. Adding, removing or renaming a label can change the numbers. A shortcut does nothing when its stage has no open windows. macOS has no shortcuts of its own for switching to a particular stage.
 
 ### Dock apps
 
@@ -54,9 +64,9 @@ Each app finds its stage by an ID, not by the label. Renaming a stage renames it
 The command-line tool needs Accessibility permission for the terminal that runs it.
 
 ```
-stagekeeper save                Save every stage (labels are kept).
+stagekeeper save                Save every stage on this desktop (labels are kept).
 stagekeeper restore [--wait N]  Open saved apps and rebuild the stages.
-stagekeeper list                Show the current stages and their labels.
+stagekeeper list                Show this desktop's stages and their labels.
 stagekeeper label "<name>"      Label the current stage ("" removes the label).
 stagekeeper colour <colour>     Colour the current stage: a palette name, #RRGGBB, or none.
 stagekeeper switch <label|n>    Switch to a labelled stage by label or shortcut number.
@@ -65,8 +75,8 @@ stagekeeper agent               Run the menu-bar item.
 
 ## Files
 
-- Layout: `~/Library/Application Support/StageKeeper/layout.json`. The previous save is in `layout.previous.json`.
-- Agent state (the boot it last restored, and your own wallpaper for each screen): `state.json` in the same folder.
+- Layouts: `~/Library/Application Support/StageKeeper/Desktops/`, one file per desktop named after the desktop's ID (`main.json` for the first desktop). The previous save of each is in `<name>.previous.json`. A `layout.json` from an earlier version is moved to `Desktops/main.json`.
+- Agent state (the boot it last restored, which desktops it has restored, and your own wallpaper for each screen and desktop): `state.json` in the same folder.
 - Colour wallpapers: `Wallpapers/` in the same folder.
 - Dock apps: `~/Applications/StageKeeper Stages`. `uninstall.sh` removes them.
 - Log: `~/Library/Logs/StageKeeper.log`.

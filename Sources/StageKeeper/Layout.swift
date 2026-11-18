@@ -634,9 +634,9 @@ enum Actions {
     }
 
     /// Moves a window of the current stage (the front one when `chosen` is nil) into a labelled
-    /// stage that has no open windows. Stage Manager has no empty stages, so the window is dragged
-    /// into the strip, which makes it a stage of its own, and the saved stage is pointed at it so
-    /// its label, colour and shortcut follow.
+    /// stage that has no open windows. Stage Manager has no empty stages, so this works only for a
+    /// window alone in its stage: the saved stage is pointed at it so its label, colour and
+    /// shortcut follow.
     static func moveWindow(_ chosen: CGWindowID?, toEmptyStage id: UUID) throws {
         guard let found = locate(id), found.layout.desktop == nil || found.layout.desktop == Desktops.current().key else {
             throw StageError.other("That stage is not on this desktop.")
@@ -647,25 +647,10 @@ enum Actions {
             throw StageError.other("The current stage has no window to move.")
         }
         let label = found.layout.stages[found.index].label ?? "that stage"
-        if snapshot.current.count > 1 {
-            let original = AX.frame(window.element)
-            func putBack() { if let original { AX.setFrame(window.element, original) } }
-            guard StripClick.dragOutToStrip(window) else {
-                putBack()
-                throw StageError.other("There is no empty space in the strip to drag the \(window.appName) window to.")
-            }
-            var alone = false
-            for _ in 0..<15 {
-                usleep(100_000)
-                if let after = try? Snapshot.take(), after.stages.contains(where: { $0.kind != .current && $0.windowIDs == [front] }) {
-                    alone = true
-                    break
-                }
-            }
-            guard alone else {
-                putBack()
-                throw StageError.other("Stage Manager did not make the \(window.appName) window a stage of its own. Some apps, such as Chrome, move their windows themselves when dragged, which Stage Manager does not notice. The window is back where it was.")
-            }
+        // Stage Manager gives no way to split a window off: the strip hides while a dragged window
+        // covers it, and a minimised window rejoins the current stage when restored.
+        guard snapshot.current.count == 1 else {
+            throw StageError.other("Only a window that is alone in its stage can move into \(label): Stage Manager gives StageKeeper no way to split a window off into a new stage. Move this stage's other windows elsewhere first.")
         }
         var layout = found.layout
         let saved = SavedWindow(bundleID: window.bundleID, appName: window.appName, title: window.title,
@@ -674,7 +659,7 @@ enum Actions {
             layout.stages[index].windows.removeAll { $0.windowID == window.id }
         }
         layout.stages[found.index].windows = [saved]
-        layout.stages[found.index].current = snapshot.current.count == 1
+        layout.stages[found.index].current = true
         try LayoutStore.write(layout, keepPrevious: true)
         Log.write("Moved the \(window.appName) window into the empty \"\(label)\" stage.")
     }

@@ -123,40 +123,6 @@ enum StripClick {
         return dragged
     }
 
-    /// Drags a window of the current stage by its title bar into an empty part of the strip,
-    /// below the last thumbnail, which makes it a stage of its own. Returns false when the strip
-    /// has no empty space to drop on.
-    static func dragOutToStrip(_ window: LiveWindow) -> Bool {
-        var dragged = false
-        withStripVisible { strip in
-            let frames = strip.compactMap { AX.frame($0.button) }
-            let screen = NSScreen.screens.first?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
-            let widest = frames.map(\.width).max() ?? 160
-            let lowest = frames.map(\.maxY).max() ?? screen.midY
-            let drop = CGPoint(x: 16 + widest / 2, y: min(lowest + 90, screen.maxY - 80))
-            guard drop.y > lowest + 20, let frame = AX.frame(window.element) else {
-                Log.write("No empty space in the strip to drop on.")
-                return
-            }
-            Log.write("Dragging the \(window.appName) window out: thumbnails \(frames.map { "\(Int($0.minY))–\(Int($0.maxY))" }), drop at \(Int(drop.x)),\(Int(drop.y)).")
-            let grab = CGPoint(x: frame.midX, y: frame.minY + 12)
-            Mouse.post(.mouseMoved, grab)
-            usleep(80_000)
-            Mouse.post(.leftMouseDown, grab)
-            usleep(200_000)
-            for step in 1...20 {
-                let t = Double(step) / 20
-                Mouse.post(.leftMouseDragged, CGPoint(x: grab.x + (drop.x - grab.x) * t, y: grab.y + (drop.y - grab.y) * t))
-                usleep(25_000)
-            }
-            usleep(600_000)
-            Mouse.post(.leftMouseUp, drop)
-            usleep(300_000)
-            dragged = true
-        }
-        return dragged
-    }
-
     /// Clears the strip's area, runs `body` with the strip's thumbnails once they are on screen,
     /// then moves the windows back.
     static func withStripVisible(_ body: ([StripItem]) -> Void) {

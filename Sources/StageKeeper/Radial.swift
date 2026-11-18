@@ -186,6 +186,8 @@ struct RadialModel {
     var stages: [Stage] = []
     /// This desktop's labelled stages with no open windows, offered as places to move a window.
     var empty: [Stage] = []
+    /// The Move ring: labelled stages, open or not, in shortcut order, then unlabelled ones.
+    var moveTargets: [Stage] = []
     var others: [Stage] = []
     /// The window the menu acts on: the current stage's window under the pointer when the menu
     /// opened, else the front window.
@@ -235,6 +237,10 @@ struct RadialModel {
             model.empty.append(Stage(title: saved.label!, label: saved.label, number: numbers[saved.id!], shortcut: shortcuts[saved.id!]?.display, colour: saved.color,
                                      isCurrent: false, initial: "", place: nil, target: .empty(saved.id!)))
         }
+        // Labelled stages with no open windows come before unlabelled ones, so a full desktop
+        // cannot push them off the Move ring.
+        model.moveTargets = Array(((model.stages.filter { $0.label != nil } + model.empty).sorted { ($0.number ?? 99) < ($1.number ?? 99) }
+            + model.stages.filter { $0.label == nil }).prefix(8))
 
         let desktops = Desktops.all()
         let current = Desktops.current().key
@@ -455,7 +461,7 @@ final class RadialView: NSView {
     private var items: [Item] {
         switch effectiveMode {
         case .switchStage: return pad(model.stages.map { .stage($0) })
-        case .move: return pad(Array((model.stages + model.empty).prefix(8)).map { .stage($0) })
+        case .move: return pad(model.moveTargets.map { .stage($0) })
         case .desktops: return pad(model.others.map { .stage($0) })
         case .colour: return Palette.colours.map { .colour($0.name, $0.hex) } + [.colour("No colour", nil)]
         }

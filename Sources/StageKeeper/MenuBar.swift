@@ -118,15 +118,23 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(restartTrackpad), name: .init("com.apple.screenIsUnlocked"), object: nil)
+        TrackpadWatch.onChange = { [weak self] in self?.restartTrackpad() }
+        TrackpadWatch.start()
     }
 
     @objc private func restartTrackpad() {
-        // Wait for the trackpad driver to come back before asking for its devices.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+        // Wait for the trackpad driver to come back before asking for its devices. Several
+        // causes can arrive together (unlock and screen wake), so only the last one restarts.
+        trackpadRestart?.cancel()
+        let restart = DispatchWorkItem {
             if Trackpad.start() { Log.write("Restarted the trackpad listener.") }
             else { Log.write("No trackpad found, so the radial menu cannot open.") }
         }
+        trackpadRestart = restart
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: restart)
     }
+
+    private var trackpadRestart: DispatchWorkItem?
 
     @objc private func desktopChanged() {
         appActivated()

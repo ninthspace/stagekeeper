@@ -1,4 +1,5 @@
 import AppKit
+import IOKit
 
 /// Counts the fingers on the trackpad, through the private MultitouchSupport framework (the one
 /// BetterTouchTool and MiddleClick use). macOS has no public way to tell how many fingers are
@@ -63,8 +64,17 @@ enum Trackpad {
             }
             return
         }
-        if mostFingers == 4, !moved, !pressedDuringTouch, time - touchStart < tapTime {
+        let held = time - touchStart
+        if mostFingers == 4, !moved, !pressedDuringTouch, held < tapTime {
             DispatchQueue.main.async { onTap?() }
+        } else if mostFingers >= 3, !pressedDuringTouch {
+            // Says why a touch of several fingers was not taken as a tap, to tune the limits.
+            var reasons: [String] = []
+            if mostFingers != 4 { reasons.append("\(mostFingers) fingers") }
+            if moved { reasons.append("moved") }
+            if held >= tapTime { reasons.append(String(format: "held %.2f s", held)) }
+            let line = "Trackpad touch not taken as a four-finger tap: " + reasons.joined(separator: ", ") + "."
+            DispatchQueue.main.async { Log.write(line) }
         }
         mostFingers = 0
         startCentre = nil
@@ -105,7 +115,38 @@ enum Trackpad {
             register(device, callback)
             startDevice(device, 0)
         }
+        Log.write("Listening to \(CFArrayGetCount(list)) trackpad\(CFArrayGetCount(list) == 1 ? "" : "s").")
         return CFArrayGetCount(list) > 0
+    }
+}
+
+/// Restarts the trackpad listener when a trackpad connects or disconnects: a Magic Trackpad
+/// that reconnects (USB or Bluetooth) comes back as a new device, and the old one sends nothing.
+enum TrackpadWatch {
+    nonisolated(unsafe) private static var port: IONotificationPortRef?
+    nonisolated(unsafe) private static var iterators: [io_iterator_t] = []
+    nonisolated(unsafe) static var onChange: (() -> Void)?
+
+    static func start() {
+        guard port == nil, let port = IONotificationPortCreate(kIOMainPortDefault) else { return }
+        self.port = port
+        CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(port).takeUnretainedValue(), .commonModes)
+        let callback: IOServiceMatchingCallback = { _, iterator in
+            // Drain the iterator, which also re-arms the notification.
+            var changed = false
+            while case let service = IOIteratorNext(iterator), service != 0 {
+                IOObjectRelease(service)
+                changed = true
+            }
+            if changed { TrackpadWatch.onChange?() }
+        }
+        for kind in [kIOFirstMatchNotification, kIOTerminatedNotification] {
+            var iterator: io_iterator_t = 0
+            guard IOServiceAddMatchingNotification(port, kind, IOServiceMatching("AppleMultitouchDevice"), callback, nil, &iterator) == KERN_SUCCESS else { continue }
+            // The first pass lists the devices already there; only later changes matter.
+            while case let service = IOIteratorNext(iterator), service != 0 { IOObjectRelease(service) }
+            iterators.append(iterator)
+        }
     }
 }
 

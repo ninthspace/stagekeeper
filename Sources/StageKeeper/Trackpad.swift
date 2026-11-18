@@ -8,6 +8,7 @@ enum Trackpad {
     private typealias Callback = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, Int32, Double, Int32) -> Int32
     private typealias Register = @convention(c) (UnsafeMutableRawPointer?, Callback) -> Void
     private typealias Start = @convention(c) (UnsafeMutableRawPointer?, Int32) -> Void
+    private typealias Stop = @convention(c) (UnsafeMutableRawPointer?) -> Void
 
     /// Fingers on the trackpad touched most recently. Written on the framework's thread and
     /// read in the event tap; a stale read only means one click is treated as ordinary.
@@ -69,16 +70,29 @@ enum Trackpad {
         startCentre = nil
     }
 
-    /// Starts listening to every trackpad. Returns false when the framework is unavailable.
+    /// Starts listening to every trackpad, first stopping any devices from an earlier start.
+    /// The devices stop sending touches after the Mac sleeps or the screen locks, so this is
+    /// called again on wake and unlock. Returns false when the framework is unavailable.
     @discardableResult
     static func start() -> Bool {
         guard let framework = dlopen("/System/Library/PrivateFrameworks/MultitouchSupport.framework/MultitouchSupport", RTLD_NOW),
               let createPointer = dlsym(framework, "MTDeviceCreateList"),
               let registerPointer = dlsym(framework, "MTRegisterContactFrameCallback"),
-              let startPointer = dlsym(framework, "MTDeviceStart") else { return false }
+              let startPointer = dlsym(framework, "MTDeviceStart"),
+              let stopPointer = dlsym(framework, "MTDeviceStop") else { return false }
         let create = unsafeBitCast(createPointer, to: CreateList.self)
         let register = unsafeBitCast(registerPointer, to: Register.self)
         let startDevice = unsafeBitCast(startPointer, to: Start.self)
+        let stopDevice = unsafeBitCast(stopPointer, to: Stop.self)
+        if let old = devices {
+            for index in 0..<CFArrayGetCount(old) {
+                stopDevice(UnsafeMutableRawPointer(mutating: CFArrayGetValueAtIndex(old, index)))
+            }
+            devices = nil
+        }
+        fingers = 0
+        mostFingers = 0
+        startCentre = nil
         guard let list = create()?.takeRetainedValue() else { return false }
         devices = list
         let callback: Callback = { _, data, count, time, _ in
@@ -131,6 +145,14 @@ enum FourFingerClick {
             }
         }, userInfo: nil) else { return false }
         tap = port
+        // macOS can turn the tap off without telling it (for example while the screen is
+        // locked), so check it every few seconds.
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+            if let tap = FourFingerClick.tap, !CGEvent.tapIsEnabled(tap: tap) {
+                CGEvent.tapEnable(tap: tap, enable: true)
+                Log.write("The four-finger click watch was off; turned it back on.")
+            }
+        }
         CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, port, 0), .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
         return true

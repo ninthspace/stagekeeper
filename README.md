@@ -32,15 +32,20 @@ The menu lists every stage by its label (or by its apps when it has no label). C
 
 ### Moving a window to another stage
 
-**Move Front Window To** moves the front window of the current stage into another stage on this desktop. StageKeeper switches to that stage, then drags the window's preview out of the strip into it, as you would by hand, and puts the window back at its original position and size. The window list gives each thumbnail's previews in the same order as Stage Manager lists the stage's windows, so the window's preview is the one at its position. As a check, a wider window must have a wider preview; if that fails, StageKeeper does not drag and says so.
+**Move Front Window To** moves the front window of the current stage into another stage on this desktop. It also lists labelled stages with no open windows: Stage Manager has no empty stages, so StageKeeper drags the window by its title bar into the empty part of the strip, which makes it a stage of its own, and gives that stage the label, colour and shortcut. StageKeeper switches to that stage, then drags the window's preview out of the strip into it, as you would by hand, and puts the window back at its original position and size. The window list gives each thumbnail's previews in the same order as Stage Manager lists the stage's windows, so the window's preview is the one at its position. As a check, a wider window must have a wider preview; if that fails, StageKeeper does not drag and says so.
 
 Your windows move aside for about a second while it works (see How it works).
+
+### Windows that show on every stage
+
+Some windows, such as Outlook's reminders, stay on screen whichever stage is showing. Once StageKeeper has seen a window in three different stages it treats it as showing everywhere: it is not saved with a stage, does not count when matching labels, and is never taken as the front window. Until then, such a window can make a stage take the label of the stage it was saved with.
 
 ### Radial menu
 
 Click or tap the trackpad with four fingers to open a round menu at the pointer. It does not take focus, so the app you were using stays in front. Tile, Bookmark and Move act on the window of the current stage that was under the pointer when the menu opened, or on the front window when the pointer was not over one. Esc, a click outside, another four-finger click or tap, or the centre closes it.
 
 - **Inner ring:** this desktop's stages (up to eight), labelled ones first in shortcut order. A labelled stage shows its label under a dot of its colour; a stage without a label shows its position in the ring, and the box under the menu names its apps. The current stage is outlined in white. Click one to switch to it. Hold ⌥ while clicking to move the front window there instead.
+- **Windows:** rest the pointer on a stage for a moment and the outer ring shows that stage's windows in place of the actions (up to eight), the first next to the stage, each with its app's icon and its title under it. The windows stay while the pointer crosses other stages or the centre on its way to one; resting on another stage shows its windows, and resting on or clicking the centre brings the actions back. Click a window to switch to its stage and bring it to the front. Use this rather than Mission Control to reach a window hidden behind others: picking a window in Mission Control takes it out of its stage.
 - **Outer ring**, clockwise from the top: Tile, Bookmark, Fetch Bookmarked Windows, other desktops' stages, Move, Colour, Label, Save. Other desktops, Move and Colour replace the inner ring with their choices; the centre then goes back.
 - **Tile:** pointing at Tile opens an arc outside the menu with nine positions for the window: halves, quarters and Maximise. The arc stays open while you cross the outer ring towards it, and closes when you move back into the inner ring. The window fills that part of the screen, using its full width; Stage Manager then hides the strip until you move the pointer to the left edge.
 - The box under the menu names what you are pointing at.
@@ -74,7 +79,17 @@ On a stage with no colour, and when StageKeeper quits, your own wallpaper comes 
 
 ### Keyboard shortcuts
 
-Labelled stages get ⌃⌥1 to ⌃⌥9: desktop 1's labelled stages first, in alphabetical order of label, then desktop 2's, and so on. The menu shows each stage's shortcut. Adding, removing or renaming a label can change the numbers. A shortcut does nothing when its stage has no open windows. macOS has no shortcuts of its own for switching to a particular stage.
+By default, labelled stages get ⌃⌥1 to ⌃⌥9: desktop 1's labelled stages first, in alphabetical order of label, then desktop 2's, and so on. The menu shows each stage's shortcut. Adding, removing or renaming a label can change these numbers; a shortcut chosen in Settings does not change. A shortcut does nothing when its stage has no open windows. macOS has no shortcuts of its own for switching to a particular stage.
+
+### Settings
+
+**Settings…** (⌘, while the menu is open) opens a window with three tabs:
+
+- **Stages:** every labelled stage on every desktop. Click a label to rename it (Return or leaving the field saves; a label another stage has is refused). Set its colour from the palette or with any colour, and record its shortcut: click the shortcut, then press a key with ⌃, ⌥ or ⌘ (a function key works on its own; Esc cancels). StageKeeper's shortcuts are off while recording. The menu beside it sets the stage back to Automatic (the next free ⌃⌥1–9) or to no shortcut. A shortcut already in use is refused.
+- **Palette:** rename, recolour, add and remove the colours offered in Colour Current Stage, the radial menu and the Stages tab. Restore Defaults puts back the ten built-in colours. Changing a palette colour does not recolour stages that already use it.
+- **Shortcuts:** the shortcut for Fetch Bookmarked Windows (⌃⌥0 by default), or none.
+
+Settings are kept in `settings.json` beside the layouts. `open stagekeeper://settings` also opens the window.
 
 ### Dock apps
 
@@ -99,6 +114,7 @@ stagekeeper agent               Run the menu-bar item.
 ## Files
 
 - Layouts: `~/Library/Application Support/StageKeeper/Desktops/`, one file per desktop named after the desktop's ID (`main.json` for the first desktop). The previous save of each is in `<name>.previous.json`. A `layout.json` from an earlier version is moved to `Desktops/main.json`.
+- Settings (palette and shortcuts): `settings.json` in the same folder.
 - Agent state (the boot it last restored, which desktops it has restored, and your own wallpaper for each screen and desktop): `state.json` in the same folder.
 - Colour wallpapers: `Wallpapers/` in the same folder.
 - Dock apps: `~/Applications/StageKeeper Stages`. `uninstall.sh` removes them.

@@ -1,57 +1,60 @@
 import AppKit
 import Carbon
 
-/// Global ⌃⌥1–9 shortcuts through the Carbon hot-key API, which needs no extra permission.
-/// Only as many keys are registered as there are labelled stages, so unused ones stay free
-/// for other apps. ⌃⌥0 (Fetch Pinned Windows) is registered only while a window is pinned;
-/// the handler receives 0 for it.
+/// Global shortcuts through the Carbon hot-key API, which needs no extra permission. Each
+/// labelled stage has one (see `Shortcuts`), and Fetch Bookmarked Windows has one that is
+/// registered only while a window is bookmarked, so unused keys stay free for other apps.
 enum Hotkeys {
-    static var handler: ((Int) -> Void)?
+    enum Target: Hashable { case stage(UUID), fetch }
+
+    static var handler: ((Target) -> Void)?
     private static var refs: [EventHotKeyRef] = []
+    private static var targets: [UInt32: Target] = [:]
+    private static var registered: [Target: Shortcut]?
     private static var installed = false
-    private static var registered = -1
-    private static let keyCodes = [kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5,
-                                   kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9]
-    static let modifiers: NSEvent.ModifierFlags = [.control, .option]
+    /// Set while the Settings window records a shortcut, so pressing one records it.
+    private static var suspended = false
 
-    private static var fetchRef: EventHotKeyRef?
-
-    static func register(count: Int, fetch: Bool = false) {
+    static func register(_ wanted: [Target: Shortcut]) {
         installHandler()
-        if fetch != (fetchRef != nil) {
-            if let fetchRef { UnregisterEventHotKey(fetchRef); self.fetchRef = nil }
-            if fetch {
-                var ref: EventHotKeyRef?
-                let status = RegisterEventHotKey(UInt32(kVK_ANSI_0), UInt32(controlKey | optionKey),
-                                                 EventHotKeyID(signature: OSType(0x53544B50), id: 0), GetApplicationEventTarget(), 0, &ref)
-                if status == noErr { fetchRef = ref } else { Log.write("⌃⌥0 is taken by another app.") }
-            }
-        }
-        let wanted = min(count, keyCodes.count)
+        let wanted = suspended ? [:] : wanted
         guard wanted != registered else { return }
+        let before = registered ?? [:]
         registered = wanted
         refs.forEach { UnregisterEventHotKey($0) }
         refs = []
-        for (index, code) in keyCodes.prefix(wanted).enumerated() {
+        targets = [:]
+        var next: UInt32 = 1
+        for (target, shortcut) in wanted.sorted(by: { $0.value.display < $1.value.display }) {
             var ref: EventHotKeyRef?
-            let id = EventHotKeyID(signature: OSType(0x53544B50), id: UInt32(index + 1))
-            let status = RegisterEventHotKey(UInt32(code), UInt32(controlKey | optionKey), id,
-                                             GetApplicationEventTarget(), 0, &ref)
-            if status == noErr, let ref { refs.append(ref) } else { Log.write("⌃⌥\(index + 1) is taken by another app.") }
+            let id = EventHotKeyID(signature: OSType(0x53544B50), id: next)
+            let status = RegisterEventHotKey(shortcut.keyCode, shortcut.carbonModifiers, id, GetApplicationEventTarget(), 0, &ref)
+            if status == noErr, let ref {
+                refs.append(ref)
+                targets[next] = target
+            } else if before[target] != shortcut {
+                Log.write("\(shortcut.display) is taken by another app.")
+            }
+            next += 1
         }
     }
 
+    /// Turns every shortcut off (while recording) or lets the next `register` turn them back on.
+    static func suspend(_ on: Bool) {
+        suspended = on
+        if on { register([:]) } else { registered = nil }
+    }
+
     private static func installHandler() {
-        if !installed {
-            var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-            InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
-                var key = EventHotKeyID()
-                GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
-                                  nil, MemoryLayout<EventHotKeyID>.size, nil, &key)
-                Hotkeys.handler?(Int(key.id))
-                return noErr
-            }, 1, &spec, nil, nil)
-            installed = true
-        }
+        guard !installed else { return }
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
+            var key = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                              nil, MemoryLayout<EventHotKeyID>.size, nil, &key)
+            if let target = Hotkeys.targets[key.id] { Hotkeys.handler?(target) }
+            return noErr
+        }, 1, &spec, nil, nil)
+        installed = true
     }
 }

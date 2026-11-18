@@ -9,6 +9,9 @@ struct AgentState: Codable {
     var pins: [Pin]?
     /// The user's own wallpaper per screen, put back on stages without a colour.
     var originalWallpapers: [String: String]?
+    /// Windows that show on every stage (see `Everywhere`), and the boot their IDs belong to.
+    var everywhere: [UInt32]?
+    var everywhereBoot: Date?
 
     static func load() -> AgentState {
         guard let data = try? Data(contentsOf: Paths.state) else { return AgentState() }
@@ -23,7 +26,7 @@ struct AgentState: Codable {
 }
 
 /// Menu-bar item showing the current stage's colour and label, with save, restore, label,
-/// colour and switch. Handles ⌃⌥1–9 and the stagekeeper://switch/<id> links the Dock apps
+/// colour and switch. Handles the stage shortcuts and the stagekeeper://switch/<id> links the Dock apps
 /// open. Restores the saved layout once per boot when it starts.
 final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var item: NSStatusItem!
@@ -42,7 +45,12 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self, selector: #selector(appActivated), name: NSWorkspace.didActivateApplicationNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(desktopChanged), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
-        Hotkeys.handler = { [weak self] number in self?.switchToNumber(number) }
+        Hotkeys.handler = { [weak self] target in
+            switch target {
+            case .fetch: self?.fetchPinned()
+            case .stage(let id): self?.perform { try Actions.switchTo(id: id) }
+            }
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refreshTitle() }
 
         if !AX.isTrusted(prompt: true) {
@@ -65,6 +73,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Links from the Dock apps: stagekeeper://switch/<stage id>.
     func application(_ application: NSApplication, open urls: [URL]) {
+        if urls.contains(where: { $0.scheme == "stagekeeper" && $0.host == "settings" }) { showSettings() }
         for url in urls where url.scheme == "stagekeeper" && url.host == "switch" {
             guard let id = UUID(uuidString: url.lastPathComponent) else { continue }
             perform { try Actions.switchTo(id: id) }
@@ -101,6 +110,22 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Trackpad.onTap = { [weak menu] in menu?.toggle(at: NSEvent.mouseLocation) }
         if !Trackpad.start() { Log.write("No trackpad found, so the radial menu cannot open.") }
         if !FourFingerClick.install() { Log.write("Could not watch for four-finger clicks.") }
+        // The trackpad stops sending touches to StageKeeper after sleep or a screen lock.
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification,
+                     NSWorkspace.sessionDidBecomeActiveNotification] {
+            workspace.addObserver(self, selector: #selector(restartTrackpad), name: name, object: nil)
+        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(restartTrackpad), name: .init("com.apple.screenIsUnlocked"), object: nil)
+    }
+
+    @objc private func restartTrackpad() {
+        // Wait for the trackpad driver to come back before asking for its devices.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            if Trackpad.start() { Log.write("Restarted the trackpad listener.") }
+            else { Log.write("No trackpad found, so the radial menu cannot open.") }
+        }
     }
 
     @objc private func desktopChanged() {
@@ -131,19 +156,21 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func appActivated() {
         refreshTitle()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.refreshTitle() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.refreshTitle() }
     }
 
     /// Updates the menu-bar title, the wallpaper and the registered shortcuts.
     @objc private func refreshTitle() {
         guard !busy, let button = item.button else { return }
         let layout = LayoutStore.load()
-        Hotkeys.register(count: Actions.numbered().count, fetch: !Pins.load().isEmpty)
+        Hotkeys.register(Shortcuts.wanted(fetchActive: !Pins.load().isEmpty))
         guard let snapshot = try? Snapshot.take() else {
             button.title = ""
             button.image = Self.symbol
             return
         }
         FocusHistory.note(snapshot)
+        Everywhere.note(snapshot)
         let indices = Matcher.savedIndices(layout, snapshot)
         let currentIndex = snapshot.stages.firstIndex { $0.kind == .current }
         let saved = currentIndex.flatMap { indices[$0] }.flatMap { layout?.stages[$0] }
@@ -169,8 +196,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let layout = LayoutStore.load()
-        let numbered = Actions.numbered()
-        let numbers = Dictionary(uniqueKeysWithValues: numbered.prefix(9).enumerated().map { ($1.id!, $0 + 1) })
+        let shortcuts = Shortcuts.stages()
         let desktops = Desktops.all()
         let desktop = Desktops.current()
         if desktops.count > 1 {
@@ -191,10 +217,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 entry.target = self
                 entry.representedObject = stage.windowIDs.first.map { NSNumber(value: $0) }
                 entry.toolTip = apps
-                if let id = saved?.id, let number = numbers[id] {
-                    entry.keyEquivalent = String(number)
-                    entry.keyEquivalentModifierMask = Hotkeys.modifiers
-                }
+                if let id = saved?.id { entry.show(shortcuts[id]) }
                 if let colour = saved?.color { entry.image = Palette.dot(colour) }
                 if stage.kind == .current {
                     entry.state = .on
@@ -219,12 +242,14 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             entry.target = self
             entry.representedObject = stage.id!.uuidString
             entry.toolTip = "None of this stage's windows are open on this desktop. Choose to forget it."
-            if let n = numbers[stage.id!] {
-                entry.keyEquivalent = String(n)
-                entry.keyEquivalentModifierMask = Hotkeys.modifiers
-            }
+            entry.show(shortcuts[stage.id!])
             if let colour = stage.color { entry.image = Palette.dot(colour) }
             menu.addItem(entry)
+            let move = NSMenuItem(title: "\(stage.label!) (no open windows)", action: #selector(moveToEmptyStage(_:)), keyEquivalent: "")
+            move.target = self
+            move.representedObject = stage.id!.uuidString
+            if let colour = stage.color { move.image = Palette.dot(colour) }
+            moveMenu.addItem(move)
         }
         // Labelled stages on other desktops, which Stage Manager does not show from here.
         for other in LayoutStore.loadAll() where other.desktop != desktop.key {
@@ -237,10 +262,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let entry = NSMenuItem(title: stage.label!, action: #selector(switchSaved(_:)), keyEquivalent: "")
                 entry.target = self
                 entry.representedObject = stage.id!.uuidString
-                if let n = numbers[stage.id!] {
-                    entry.keyEquivalent = String(n)
-                    entry.keyEquivalentModifierMask = Hotkeys.modifiers
-                }
+                entry.show(shortcuts[stage.id!])
                 if let colour = stage.color { entry.image = Palette.dot(colour) }
                 menu.addItem(entry)
             }
@@ -252,13 +274,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let pinItem = NSMenuItem(title: "\(pinned ? "Remove Bookmark from" : "Bookmark") \(window.appName) Window", action: #selector(togglePin(_:)), keyEquivalent: "")
             pinItem.target = self
             pinItem.representedObject = NSNumber(value: front)
-            pinItem.toolTip = "Fetch Bookmarked Windows (⌃⌥0) brings bookmarked windows into the stage you are in."
+            pinItem.toolTip = "Fetch Bookmarked Windows\(Shortcuts.fetch.map { " (\($0.display))" } ?? "") brings bookmarked windows into the stage you are in."
             menu.addItem(pinItem)
         }
         let pins = Pins.load()
         if !pins.isEmpty {
-            let fetch = NSMenuItem(title: "Fetch Bookmarked Windows", action: #selector(fetchPinned), keyEquivalent: "0")
-            fetch.keyEquivalentModifierMask = Hotkeys.modifiers
+            let fetch = NSMenuItem(title: "Fetch Bookmarked Windows", action: #selector(fetchPinned), keyEquivalent: "")
+            fetch.show(Shortcuts.fetch)
             fetch.target = self
             menu.addItem(fetch)
             let pinsMenu = NSMenu()
@@ -302,6 +324,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(withTitle: "Saved \(saved)", action: nil, keyEquivalent: "")
         }
         add(menu, "Show Layout File", #selector(showFile), "")
+        add(menu, "Settings…", #selector(showSettings), ",")
         add(menu, "Show Dock Apps", #selector(showDockApps), "")
         menu.addItem(.separator())
         add(menu, "Quit StageKeeper", #selector(NSApplication.terminate(_:)), "q", target: NSApp)
@@ -330,7 +353,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             notify("Removed the bookmark from the \(window.appName) window.")
         } else {
             Pins.pin(window)
-            notify("Bookmarked the \(window.appName) window. Press ⌃⌥0 to bring bookmarked windows into the stage you are in.")
+            notify("Bookmarked the \(window.appName) window. \(Shortcuts.fetch.map { "Press \($0.display)" } ?? "Choose Fetch Bookmarked Windows") to bring bookmarked windows into the stage you are in.")
         }
     }
 
@@ -364,15 +387,17 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         perform { try Actions.moveFrontWindow(toStageWith: target) }
     }
 
-    @objc private func switchSaved(_ sender: NSMenuItem) {
+    @objc private func moveToEmptyStage(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let id = UUID(uuidString: raw) else { return }
-        perform { try Actions.switchTo(id: id) }
+        perform { try Actions.moveWindow(nil, toEmptyStage: id) }
     }
 
-    private func switchToNumber(_ number: Int) {
-        if number == 0 { fetchPinned(); return }
-        let list = Actions.numbered()
-        guard number >= 1, number <= list.count, let id = list[number - 1].id else { return }
+    @objc private func showSettings() {
+        SettingsWindow.show { [weak self] in self?.refreshTitle() }
+    }
+
+    @objc private func switchSaved(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let id = UUID(uuidString: raw) else { return }
         perform { try Actions.switchTo(id: id) }
     }
 

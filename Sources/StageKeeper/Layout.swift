@@ -200,17 +200,23 @@ enum Matcher {
         guard let layout else { return result }
         let matched = match(layout, snapshot, loose: false)
         let bookmarked = Set(Pins.load().filter { System.sameBoot($0.bootTime) }.map(\.windowID))
-        var pairs: [(overlap: Int, live: Int, saved: Int)] = []
+        let everywhere = Everywhere.ids()
+        var pairs: [(overlap: Int, share: Double, live: Int, saved: Int)] = []
         for (l, live) in snapshot.stages.enumerated() {
             let liveSet = Set(live.windowIDs)
             for (s, saved) in layout.stages.enumerated() where saved.isIdentified {
-                let shared = matched[s].compactMap { $0 }.filter(liveSet.contains)
+                let shared = matched[s].compactMap { $0 }.filter { liveSet.contains($0) && !everywhere.contains($0) }
                 let overlap = shared.filter { !bookmarked.contains($0) }.count * 100 + shared.filter(bookmarked.contains).count
-                if overlap > 0 { pairs.append((overlap, l, s)) }
+                // On equal overlap, the saved stage with more of its windows here wins. A window
+                // that shows on every stage, such as an Outlook reminder, otherwise ties a stage
+                // with the one it was saved in.
+                let counted = matched[s].enumerated().filter { _, id in id.map { !everywhere.contains($0) } ?? true }.count
+                let share = Double(shared.count) / Double(max(counted, 1))
+                if overlap > 0 { pairs.append((overlap, share, l, s)) }
             }
         }
         var usedSaved = Set<Int>()
-        for p in pairs.sorted(by: { $0.overlap > $1.overlap }) where result[p.live] == nil && !usedSaved.contains(p.saved) {
+        for p in pairs.sorted(by: { $0.overlap != $1.overlap ? $0.overlap > $1.overlap : $0.share > $1.share }) where result[p.live] == nil && !usedSaved.contains(p.saved) {
             result[p.live] = p.saved
             usedSaved.insert(p.saved)
         }
@@ -230,21 +236,29 @@ enum Actions {
         let snapshot = try Snapshot.take()
         let previous = LayoutStore.load(desktop)
         let indices = Matcher.savedIndices(previous, snapshot)
-        let stages = snapshot.stages.enumerated().map { index, stage in
+        let everywhere = Everywhere.ids()
+        let stages = snapshot.stages.enumerated().compactMap { index, stage -> SavedStage? in
             let old = indices[index].flatMap { previous?.stages[$0] }
+            let ids = stage.windowIDs.filter { !everywhere.contains($0) }
+            guard !ids.isEmpty else { return nil }
             return SavedStage(
                 id: old?.id ?? UUID(),
                 label: old?.label,
                 color: old?.color,
                 current: stage.kind == .current,
-                windows: stage.windowIDs.map { id in
+                windows: ids.map { id in
                     let w = snapshot.windows[id]!
                     return SavedWindow(bundleID: w.bundleID, appName: w.appName, title: w.title,
                                        frame: SavedRect(w.frame), windowID: w.id)
                 }
             )
         }
-        let layout = Layout(savedAt: Date(), bootTime: System.bootTime, stages: stages, desktop: desktop)
+        // Labelled stages with no open windows here are kept, so their label, colour, shortcut and
+        // Dock app survive until you forget them or give the name to another stage.
+        let kept = (previous?.stages ?? []).enumerated()
+            .filter { $0.element.label != nil && !indices.contains($0.offset) }
+            .map { var stage = $0.element; stage.current = false; return stage }
+        let layout = Layout(savedAt: Date(), bootTime: System.bootTime, stages: stages + kept, desktop: desktop)
         try LayoutStore.write(layout, keepPrevious: true)
         Log.write("Saved \(stages.count) stages, \(snapshot.windows.count) windows.")
         return layout
@@ -266,6 +280,29 @@ enum Actions {
     /// Saves, then sets (or clears, when empty) the label of the current stage.
     static func labelCurrent(_ label: String) throws {
         let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Giving the current stage the name of another stage on this desktop moves that stage here:
+        // its identity (shortcut, Dock app) and colour come along, and the old entry goes. This is
+        // how a window becomes a labelled stage that had no open windows.
+        func named(_ stage: SavedStage) -> Bool { !stage.current && stage.label?.caseInsensitiveCompare(trimmed) == .orderedSame }
+        if !trimmed.isEmpty, LayoutStore.load()?.stages.contains(where: named) == true {
+            var layout = try save()
+            guard let here = layout.stages.firstIndex(where: \.current) else {
+                throw StageError.other("There is no current stage with windows.")
+            }
+            if let there = layout.stages.firstIndex(where: named) {
+                let previousID = layout.stages[here].id
+                let takenID = layout.stages[there].id
+                layout.stages[here].id = takenID
+                layout.stages[here].color = layout.stages[here].color ?? layout.stages[there].color
+                layout.stages[here].label = layout.stages[there].label
+                layout.stages.remove(at: there)
+                if let previousID, previousID != takenID { DockApps.remove(previousID) }
+                try LayoutStore.write(layout, keepPrevious: false)
+                DockApps.sync()
+                Log.write("Moved the \"\(trimmed)\" label to the current stage.")
+                return
+            }
+        }
         let stage = try editCurrent { $0.label = trimmed.isEmpty ? nil : trimmed }
         if trimmed.isEmpty, let id = stage.id { DockApps.remove(id) }
         Log.write(trimmed.isEmpty ? "Cleared current stage label." : "Labelled current stage \"\(trimmed)\".")
@@ -510,7 +547,9 @@ enum Actions {
             guard let element = AX.value(AX.application(app.processIdentifier), kAXFocusedWindowAttribute) else { return nil }
             return AX.windowID(element as! AXUIElement)
         }
-        return focused.flatMap { current.contains($0) ? $0 : nil } ?? Snapshot.zOrder().first(where: current.contains)
+        let everywhere = Everywhere.ids()
+        return focused.flatMap { current.contains($0) && !everywhere.contains($0) ? $0 : nil }
+            ?? Snapshot.zOrder().first { current.contains($0) && !everywhere.contains($0) }
     }
 
     /// Moves the front window of the current stage into the stage holding `targetWindow`:
@@ -592,6 +631,52 @@ enum Actions {
             Log.write("After \(action), these stages are now one: \(names.map { "[\($0)]" }.joined(separator: " + ")).")
             throw StageError.other("Two stages merged while \(action). See the log.")
         }
+    }
+
+    /// Moves a window of the current stage (the front one when `chosen` is nil) into a labelled
+    /// stage that has no open windows. Stage Manager has no empty stages, so the window is dragged
+    /// into the strip, which makes it a stage of its own, and the saved stage is pointed at it so
+    /// its label, colour and shortcut follow.
+    static func moveWindow(_ chosen: CGWindowID?, toEmptyStage id: UUID) throws {
+        guard let found = locate(id), found.layout.desktop == nil || found.layout.desktop == Desktops.current().key else {
+            throw StageError.other("That stage is not on this desktop.")
+        }
+        let snapshot = try Snapshot.take()
+        guard let front = chosen.flatMap({ snapshot.current.contains($0) ? $0 : nil }) ?? frontWindow(snapshot),
+              let window = snapshot.windows[front] else {
+            throw StageError.other("The current stage has no window to move.")
+        }
+        let label = found.layout.stages[found.index].label ?? "that stage"
+        if snapshot.current.count > 1 {
+            let original = AX.frame(window.element)
+            func putBack() { if let original { AX.setFrame(window.element, original) } }
+            guard StripClick.dragOutToStrip(window) else {
+                putBack()
+                throw StageError.other("There is no empty space in the strip to drag the \(window.appName) window to.")
+            }
+            var alone = false
+            for _ in 0..<15 {
+                usleep(100_000)
+                if let after = try? Snapshot.take(), after.stages.contains(where: { $0.kind != .current && $0.windowIDs == [front] }) {
+                    alone = true
+                    break
+                }
+            }
+            guard alone else {
+                putBack()
+                throw StageError.other("Stage Manager did not make the \(window.appName) window a stage of its own. Some apps, such as Chrome, move their windows themselves when dragged, which Stage Manager does not notice. The window is back where it was.")
+            }
+        }
+        var layout = found.layout
+        let saved = SavedWindow(bundleID: window.bundleID, appName: window.appName, title: window.title,
+                                frame: SavedRect(window.frame), windowID: window.id)
+        for index in layout.stages.indices {
+            layout.stages[index].windows.removeAll { $0.windowID == window.id }
+        }
+        layout.stages[found.index].windows = [saved]
+        layout.stages[found.index].current = snapshot.current.count == 1
+        try LayoutStore.write(layout, keepPrevious: true)
+        Log.write("Moved the \(window.appName) window into the empty \"\(label)\" stage.")
     }
 
     /// Finds a labelled stage by shortcut number (1-based) or by label, ignoring case.

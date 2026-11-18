@@ -41,6 +41,8 @@ case "restore":
     runCLI { _ = try restorer.run() }
 case "list":
     runCLI { print(try Actions.describe()) }
+case "timings":
+    runCLI { print(Snapshot.timings()) }
 case "label":
     guard args.count >= 2 else { print(usage); exit(2) }
     runCLI { try Actions.labelCurrent(args.dropFirst().joined(separator: " ")) }

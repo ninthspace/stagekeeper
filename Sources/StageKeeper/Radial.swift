@@ -21,7 +21,7 @@ final class RadialMenu {
     init(hooks: Hooks) { self.hooks = hooks }
 
     func toggle(at point: NSPoint) {
-        if panel != nil { close() } else { open(at: point) }
+        if panel != nil { close(animated: true) } else { open(at: point) }
     }
 
     func open(at point: NSPoint) {
@@ -44,15 +44,24 @@ final class RadialMenu {
         view.pointerMoved(to: view.convert(panel.mouseLocationOutsideOfEventStream, from: nil))
         Log.write("Radial menu opened; modifier keys held: \(NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask).rawValue).")
         outsideClicks = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
-            self?.close()
+            self?.close(animated: true)
         }
     }
 
-    func close() {
-        panel?.orderOut(nil)
-        panel = nil
+    /// Closes the menu. A dismissal (Esc, a click outside, the centre) shrinks it away; a
+    /// choice hides it at once, because the work that follows holds up the main thread and
+    /// would stop the animation part-way.
+    func close(animated: Bool = false) {
+        guard let panel else { return }
+        self.panel = nil
         if let outsideClicks { NSEvent.removeMonitor(outsideClicks) }
         outsideClicks = nil
+        panel.ignoresMouseEvents = true
+        if animated, let view = panel.contentView as? RadialView {
+            view.disappear { panel.orderOut(nil) }
+        } else {
+            panel.orderOut(nil)
+        }
     }
 
     // MARK: Choices
@@ -68,6 +77,11 @@ final class RadialMenu {
         }
     }
 
+    func show(_ windowID: CGWindowID) {
+        close()
+        hooks.perform { try Actions.showWindow(windowID) }
+    }
+
     func switchSaved(_ id: UUID) {
         close()
         hooks.perform { try Actions.switchTo(id: id) }
@@ -76,6 +90,11 @@ final class RadialMenu {
     func move(_ window: CGWindowID?, to windowID: CGWindowID) {
         close()
         hooks.perform { try Actions.moveFrontWindow(toStageWith: windowID, window: window) }
+    }
+
+    func moveToEmpty(_ window: CGWindowID?, _ id: UUID) {
+        close()
+        hooks.perform { try Actions.moveWindow(window, toEmptyStage: id) }
     }
 
     func tile(_ window: CGWindowID?, _ part: CGRect) {
@@ -99,7 +118,7 @@ final class RadialMenu {
             hooks.notify("Removed the bookmark from the \(window.appName) window.")
         } else {
             Pins.pin(window)
-            hooks.notify("Bookmarked the \(window.appName) window. Press ⌃⌥0 to bring bookmarked windows into the stage you are in.")
+            hooks.notify("Bookmarked the \(window.appName) window. \(Shortcuts.fetch.map { "Press \($0.display)" } ?? "Choose Fetch Bookmarked Windows") to bring bookmarked windows into the stage you are in.")
         }
         hooks.refresh()
     }
@@ -138,7 +157,14 @@ final class RadialPanel: NSPanel {
 
 /// What the menu shows, read once when it opens.
 struct RadialModel {
-    enum Target { case live(CGWindowID), saved(UUID) }
+    enum Target { case live(CGWindowID), saved(UUID), empty(UUID) }
+
+    struct Window {
+        let id: CGWindowID
+        let app: String
+        let title: String
+        let icon: NSImage?
+    }
 
     struct Stage {
         let title: String
@@ -146,14 +172,20 @@ struct RadialModel {
         /// Position among this desktop's stages in the menu, shown for stages without a label.
         var position = 0
         let number: Int?
+        /// The stage's shortcut as shown, such as "⌃⌥1".
+        var shortcut: String? = nil
         let colour: String?
         let isCurrent: Bool
         let initial: String
         let place: String?
         let target: Target
+        /// The stage's windows, for the arc that opens when the stage is pointed at.
+        var windows: [Window] = []
     }
 
     var stages: [Stage] = []
+    /// This desktop's labelled stages with no open windows, offered as places to move a window.
+    var empty: [Stage] = []
     var others: [Stage] = []
     /// The window the menu acts on: the current stage's window under the pointer when the menu
     /// opened, else the front window.
@@ -170,18 +202,26 @@ struct RadialModel {
         let layout = LayoutStore.load()
         let indices = Matcher.savedIndices(layout, snapshot)
         let numbers = Dictionary(uniqueKeysWithValues: Actions.numbered().prefix(9).enumerated().map { ($1.id!, $0 + 1) })
+        let shortcuts = Shortcuts.stages()
         var labelled: [Stage] = []
         var unlabelled: [Stage] = []
         // Overflow stages are ones the strip has no room for; switching to them works the same way.
+        let everywhere = Everywhere.ids()
+        var icons: [pid_t: NSImage] = [:]
         for (index, stage) in snapshot.stages.enumerated() {
             guard let first = stage.windowIDs.first else { continue }
             let saved = indices[index].flatMap { layout?.stages[$0] }
             let apps = stage.windowIDs.compactMap { snapshot.windows[$0]?.appName }
                 .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
             let title = saved?.label ?? apps.joined(separator: ", ")
-            let entry = Stage(title: title, label: saved?.label, number: saved?.id.flatMap { numbers[$0] }, colour: saved?.color,
+            let entry = Stage(title: title, label: saved?.label, number: saved?.id.flatMap { numbers[$0] }, shortcut: saved?.id.flatMap { shortcuts[$0]?.display }, colour: saved?.color,
                               isCurrent: stage.kind == .current, initial: String(apps.first?.prefix(1) ?? "·"),
-                              place: nil, target: .live(first))
+                              place: nil, target: .live(first),
+                              windows: stage.windowIDs.filter { !everywhere.contains($0) }.prefix(9).compactMap { id in
+                                  guard let window = snapshot.windows[id] else { return nil }
+                                  if icons[window.pid] == nil { icons[window.pid] = NSRunningApplication(processIdentifier: window.pid)?.icon }
+                                  return Window(id: id, app: window.appName, title: window.title, icon: icons[window.pid])
+                              })
             if stage.kind == .current {
                 model.currentTitle = title
                 model.currentColour = saved?.color
@@ -191,6 +231,10 @@ struct RadialModel {
         labelled.sort { ($0.number ?? 99) < ($1.number ?? 99) }
         model.stages = Array((labelled + unlabelled).prefix(8))
         for i in model.stages.indices { model.stages[i].position = i + 1 }
+        for (index, saved) in (layout?.stages ?? []).enumerated() where saved.label != nil && saved.id != nil && !indices.contains(index) {
+            model.empty.append(Stage(title: saved.label!, label: saved.label, number: numbers[saved.id!], shortcut: shortcuts[saved.id!]?.display, colour: saved.color,
+                                     isCurrent: false, initial: "", place: nil, target: .empty(saved.id!)))
+        }
 
         let desktops = Desktops.all()
         let current = Desktops.current().key
@@ -200,7 +244,7 @@ struct RadialModel {
             for stage in other.stages {
                 guard let label = stage.label, let id = stage.id else { continue }
                 if let number { otherNumbers.insert(number) }
-                model.others.append(Stage(title: label, label: label, number: numbers[id], colour: stage.color, isCurrent: false,
+                model.others.append(Stage(title: label, label: label, number: numbers[id], shortcut: shortcuts[id]?.display, colour: stage.color, isCurrent: false,
                                           initial: String(label.prefix(1)), place: number.map { "Desktop \($0)" },
                                           target: .saved(id)))
             }
@@ -210,7 +254,7 @@ struct RadialModel {
 
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
         let topLeft = CGPoint(x: point.x, y: primaryHeight - point.y)
-        let currentWindows = Set(snapshot.current)
+        let currentWindows = Set(snapshot.current).subtracting(Everywhere.ids())
         let underPointer = Snapshot.zOrder().first { id in
             currentWindows.contains(id) && (snapshot.windows[id]?.frame.contains(topLeft) ?? false)
         }
@@ -246,7 +290,10 @@ final class RadialView: NSView {
     ]
 
     private enum Mode { case switchStage, move, desktops, colour }
-    private enum Hover: Equatable { case none, centre, inner(Int), outer(Int), arc(Int) }
+    private enum Hover: Equatable { case none, centre, inner(Int), outer(Int), arc(Int), window(Int) }
+    /// What opens outside the menu: the tile positions, or the windows of the stage at an index
+    /// of the inner ring.
+    private enum Arc: Equatable { case none, tile, windows(Int) }
     private enum Item {
         case stage(RadialModel.Stage), colour(String, String?), empty
         var isEmpty: Bool { if case .empty = self { return true } else { return false } }
@@ -257,7 +304,133 @@ final class RadialView: NSView {
     private weak var radial: RadialMenu?
     private var mode = Mode.switchStage
     private var hover = Hover.none
-    private var tileOpen = false
+    private var arc = Arc.none {
+        didSet {
+            guard arc != oldValue else { return }
+            closingArc = oldValue
+            arcChanged = CACurrentMediaTime()
+            animate()
+        }
+    }
+    private var closingArc = Arc.none
+    private var tileOpen: Bool { arc == .tile }
+    /// Opens a stage's window arc once the pointer has rested on the stage, so passing over
+    /// stages on the way to the outer ring opens nothing.
+    private var windowsTimer: Timer?
+    private static let windowsDelay = 0.35
+
+    // MARK: Animation
+
+    /// The menu grows from the pointer with a slight overshoot; the tile arc's positions slide
+    /// out from under the outer ring one after another, starting from the middle (Maximise),
+    /// and a stage's windows slide out from under the inner ring in place of the actions.
+    private static let appearTime = 0.26, disappearTime = 0.13
+    private static let arcTime = 0.22, arcStagger = 0.03, arcCloseTime = 0.14
+    private let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    private let opened = CACurrentMediaTime()
+    private var arcChanged = 0.0
+    private var closing: Double?
+    private var onClosed: (() -> Void)?
+    private var ticker: Timer?
+
+    private func elapsed(since start: Double) -> Double { CACurrentMediaTime() - start }
+
+    /// Ease out with an overshoot of about 10%.
+    private static func overshoot(_ t: Double) -> CGFloat {
+        let t = min(max(t, 0), 1), c1 = 1.70158, c3 = c1 + 1
+        return CGFloat(1 + c3 * pow(t - 1, 3) + c1 * pow(t - 1, 2))
+    }
+
+    private var animating: Bool {
+        if reduceMotion { return closing != nil && elapsed(since: closing!) < Self.disappearTime }
+        if let closing { return elapsed(since: closing) < Self.disappearTime }
+        let arcDuration = max(Self.arcTime + 4 * Self.arcStagger, Self.arcCloseTime)
+        return elapsed(since: opened) < Self.appearTime || elapsed(since: arcChanged) < arcDuration
+    }
+
+    private func animate() {
+        guard ticker == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.needsDisplay = true
+            if !self.animating {
+                self.ticker?.invalidate()
+                self.ticker = nil
+                if self.closing != nil { self.onClosed?(); self.onClosed = nil }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        ticker = timer
+    }
+
+    func disappear(then done: @escaping () -> Void) {
+        closing = CACurrentMediaTime()
+        onClosed = done
+        animate()
+    }
+
+    /// Scale and opacity of the whole menu at this moment.
+    private var menuScale: (scale: CGFloat, alpha: CGFloat) {
+        if let closing {
+            let t = CGFloat(min(elapsed(since: closing) / Self.disappearTime, 1))
+            return (reduceMotion ? 1 : 1 - 0.15 * t * t, 1 - t)
+        }
+        if reduceMotion { return (1, 1) }
+        let t = elapsed(since: opened) / Self.appearTime
+        return (0.55 + 0.45 * Self.overshoot(t), CGFloat(min(t * 2.5, 1)))
+    }
+
+    /// How far position `i` of an arc of `count` has grown out (0 to just over 1), and its
+    /// opacity: growing when `opening`, else fading.
+    private func arcLevel(_ i: Int, of count: Int, opening: Bool) -> (level: CGFloat, alpha: CGFloat) {
+        if reduceMotion { return opening ? (1, 1) : (0, 0) }
+        let since = elapsed(since: arcChanged)
+        guard opening else {
+            // Slides back under, speeding up, and fades over the second half.
+            let t = CGFloat(min(since / Self.arcCloseTime, 1))
+            return (1 - t * t, min(1, 2 - 2 * t))
+        }
+        // Tile positions start from the middle; window slots are already ordered outwards from
+        // the stage, two to a step.
+        let rank = arc == .tile ? abs(Double(i) - Double(count - 1) / 2) : Double((i + 1) / 2)
+        let t = (since - rank * Self.arcStagger) / Self.arcTime
+        return (Self.easeOut(t), CGFloat(min(max(t * 3, 0), 1)))
+    }
+
+    /// Slides out, slowing to a stop, with no overshoot.
+    private static func easeOut(_ t: Double) -> CGFloat {
+        let t = min(max(t, 0), 1)
+        return CGFloat(1 - pow(1 - t, 3))
+    }
+
+    /// How far the outer ring's actions are out from under the inner ring: they slide under
+    /// while a stage's windows slide out, and back out when the windows go.
+    private var actionsLevel: (level: CGFloat, alpha: CGFloat) {
+        func isWindows(_ arc: Arc) -> Bool { if case .windows = arc { return true } else { return false } }
+        let now = isWindows(arc), before = isWindows(closingArc)
+        if now == before { return now ? (0, 0) : (1, 1) }
+        return now ? arcLevel(0, of: 1, opening: false) : arcLevel(0, of: 1, opening: true)
+    }
+
+    /// The windows shown in place of the outer ring, up to one per slot.
+    private func windows(_ arc: Arc) -> [RadialModel.Window] {
+        guard case .windows(let i) = arc, i < model.stages.count else { return [] }
+        return Array(model.stages[i].windows.prefix(8))
+    }
+
+    /// Outer-ring slots for a stage's windows: the slot beside the stage first, then
+    /// alternately clockwise and anticlockwise from it.
+    private static let windowSlots: [CGFloat] = [0, 1, -1, 2, -2, 3, -3, 4]
+
+    private func angles(_ arc: Arc) -> [CGFloat] {
+        switch arc {
+        case .none: return []
+        case .tile: return (0..<9).map { -80 + CGFloat($0) * 20 }
+        case .windows(let i):
+            let centre = CGFloat(i) * 360 / CGFloat(items.count)
+            return Self.windowSlots.prefix(windows(arc).count).map { centre + $0 * 45 }
+        }
+    }
 
     init(model: RadialModel, menu: RadialMenu) {
         self.model = model
@@ -265,6 +438,7 @@ final class RadialView: NSView {
         super.init(frame: NSRect(origin: .zero, size: Self.size))
         setBoundsSize(Self.design)
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self))
+        animate()
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -280,7 +454,8 @@ final class RadialView: NSView {
 
     private var items: [Item] {
         switch effectiveMode {
-        case .switchStage, .move: return pad(model.stages.map { .stage($0) })
+        case .switchStage: return pad(model.stages.map { .stage($0) })
+        case .move: return pad(Array((model.stages + model.empty).prefix(8)).map { .stage($0) })
         case .desktops: return pad(model.others.map { .stage($0) })
         case .colour: return Palette.colours.map { .colour($0.name, $0.hex) } + [.colour("No colour", nil)]
         }
@@ -306,9 +481,9 @@ final class RadialView: NSView {
         switch action {
         case .tile: return ("Tile the \(app) window", "Point outwards to choose a position")
         case .bookmark:
-            return model.bookmarked ? ("Remove the bookmark from the \(app) window", "It stops coming with ⌃⌥0")
-                : ("Bookmark the \(app) window", "Fetch Bookmarked Windows (⌃⌥0) brings it into the stage you are in")
-        case .fetch: return ("Fetch bookmarked windows", "⌃⌥0 · brings bookmarked windows into this stage")
+            return model.bookmarked ? ("Remove the bookmark from the \(app) window", "It stops coming with Fetch Bookmarked Windows")
+                : ("Bookmark the \(app) window", "Fetch Bookmarked Windows brings it into the stage you are in")
+        case .fetch: return ("Fetch bookmarked windows", (Shortcuts.fetch.map { "\($0.display) · " } ?? "") + "brings bookmarked windows into this stage")
         case .desktops:
             return model.others.isEmpty ? ("No labelled stages on other desktops", "Label stages there to list them here")
                 : ("\(model.otherDesktops) stages", "Switches desktop, then stage")
@@ -352,9 +527,24 @@ final class RadialView: NSView {
         let r = hypot(dx, dy)
         var a = atan2(dx, -dy) * 180 / .pi
         if a < 0 { a += 360 }
+        if case .windows = arc, r >= rInner, r < rOuter {
+            for (k, angle) in angles(arc).enumerated() {
+                var d = (a - angle).truncatingRemainder(dividingBy: 360)
+                if d > 180 { d -= 360 } else if d < -180 { d += 360 }
+                if abs(d) < 22.5 { return .window(k) }
+            }
+            return .window(-1)  // where an empty slot would be: does nothing
+        }
         if tileOpen, r >= rOuter, r <= rArc + 16 {
-            let relative = a > 180 ? a - 360 : a
-            if relative >= -90, relative <= 90 { return .arc(min(8, max(0, Int((relative + 90) / 20)))) }
+            for (k, angle) in angles(arc).enumerated() {
+                var d = (a - angle).truncatingRemainder(dividingBy: 360)
+                if d > 180 { d -= 360 } else if d < -180 { d += 360 }
+                // The end positions also take the space just beyond them.
+                let last = k == angles(arc).count - 1
+                if (d >= -10 || k == 0 && d >= -20) && (d < 10 || last && d < 20) {
+                    return .arc(k)
+                }
+            }
         }
         if r < rCentre { return .centre }
         if r < rInner {
@@ -369,13 +559,39 @@ final class RadialView: NSView {
 
     func pointerMoved(to p: NSPoint) {
         let next = hit(p)
-        // Once open, the tile arc stays open while the pointer crosses the outer ring, so a
-        // position at either end of the arc can be reached in a straight line from Tile. Moving
-        // back into the inner ring or the centre closes it.
-        switch next {
-        case .outer(0): tileOpen = true
-        case .inner, .centre: tileOpen = false
-        default: break
+        // Each arc stays open while the pointer crosses the rings on its way to a position, so
+        // every position can be reached in a straight line. Tile opens its arc when pointed at,
+        // and moving into the inner ring or the centre closes it. A stage's windows open after
+        // the pointer rests on the stage; once they are showing, they change to another stage's
+        // windows, or close at the centre, only after the pointer rests there too, so crossing
+        // other stages or the centre on the way to a window leaves them open.
+        if next != hover {
+            windowsTimer?.invalidate()
+            windowsTimer = nil
+            let showingWindows: Bool = { if case .windows = arc { return true } else { return false } }()
+            func after(_ change: @escaping () -> Void) {
+                windowsTimer = Timer.scheduledTimer(withTimeInterval: Self.windowsDelay, repeats: false) { [weak self] _ in
+                    guard let self, self.hover == next, self.effectiveMode == .switchStage else { return }
+                    change()
+                    self.needsDisplay = true
+                }
+            }
+            switch next {
+            case .outer(0):
+                if !showingWindows { arc = .tile }
+            case .inner(let i):
+                let hasWindows = effectiveMode == .switchStage && i < model.stages.count && !model.stages[i].windows.isEmpty
+                if showingWindows {
+                    if arc != .windows(i) { after { [weak self] in self?.arc = hasWindows ? .windows(i) : .none } }
+                } else {
+                    arc = .none
+                    if hasWindows { after { [weak self] in self?.arc = .windows(i) } }
+                }
+            case .centre:
+                if showingWindows { after { [weak self] in self?.arc = .none } } else { arc = .none }
+            default:
+                break
+            }
         }
         hover = next
         needsDisplay = true
@@ -387,7 +603,7 @@ final class RadialView: NSView {
     override func flagsChanged(with event: NSEvent) { needsDisplay = true }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { radial?.close() } else { super.keyDown(with: event) }
+        if event.keyCode == 53 { radial?.close(animated: true) } else { super.keyDown(with: event) }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -395,11 +611,15 @@ final class RadialView: NSView {
         guard let menu = radial else { return }
         switch target {
         case .none:
-            menu.close()
+            menu.close(animated: true)
         case .centre:
-            if mode == .switchStage { menu.close() } else { mode = .switchStage; needsDisplay = true }
+            if case .windows = arc { arc = .none; needsDisplay = true }
+            else if mode == .switchStage { menu.close(animated: true) } else { mode = .switchStage; needsDisplay = true }
         case .arc(let i):
             menu.tile(model.window, Self.tiles[i].part)
+        case .window(let k):
+            let list = windows(arc)
+            if list.indices.contains(k) { menu.show(list[k].id) }
         case .inner(let i):
             switch items[i] {
             case .empty: break
@@ -408,6 +628,8 @@ final class RadialView: NSView {
                 switch (effectiveMode, stage.target) {
                 case (.move, .live(let id)):
                     if stage.isCurrent { NSSound.beep() } else { menu.move(model.window, to: id) }
+                case (_, .empty(let id)):
+                    menu.moveToEmpty(model.window, id)
                 case (_, .live(let id)):
                     if stage.isCurrent { menu.close() } else { menu.switchTo(id) }
                 case (_, .saved(let id)):
@@ -416,14 +638,15 @@ final class RadialView: NSView {
             }
         case .outer(let i):
             switch Action.allCases[i] {
-            case .tile: tileOpen.toggle()
+            case .tile: arc = tileOpen ? .none : .tile
             case .bookmark: menu.toggleBookmark(model.window)
             case .fetch: menu.fetchBookmarks()
-            case .desktops: if !model.others.isEmpty { mode = mode == .desktops ? .switchStage : .desktops }
+            case .desktops: if !model.others.isEmpty { mode = mode == .desktops ? .switchStage : .desktops; arc = .none }
             case .move:
                 mode = mode == .move ? .switchStage : .move
+                arc = .none
                 Log.write("Radial menu: Move chosen (\(mode == .move ? "on" : "off")).")
-            case .colour: mode = mode == .colour ? .switchStage : .colour
+            case .colour: mode = mode == .colour ? .switchStage : .colour; arc = .none
             case .label: menu.label()
             case .save: menu.save()
             }
@@ -441,22 +664,35 @@ final class RadialView: NSView {
     private static let secondary = NSColor(srgbRed: 0.72, green: 0.72, blue: 0.74, alpha: 1)
 
     override func draw(_ dirtyRect: NSRect) {
-        // Disc with shadow.
-        NSGraphicsContext.saveGraphicsState()
-        let shadow = NSShadow()
-        shadow.shadowColor = NSColor(white: 0, alpha: 0.55)
-        shadow.shadowBlurRadius = 24
-        shadow.shadowOffset = NSSize(width: 0, height: -10)
-        shadow.set()
+        let (scale, alpha) = menuScale
+        guard alpha > 0, let context = NSGraphicsContext.current?.cgContext else { return }
+        context.saveGState()
+        defer { context.restoreGState() }
+        context.translateBy(x: Self.centre.x, y: Self.centre.y)
+        context.scaleBy(x: scale, y: scale)
+        context.translateBy(x: -Self.centre.x, y: -Self.centre.y)
+        context.setAlpha(alpha)
+        context.beginTransparencyLayer(auxiliaryInfo: nil)
+        defer { context.endTransparencyLayer() }
+
+        drawArc(.tile)
+
+        // The disc, the outer ring and any window slots share one shadow. The disc reaches only
+        // to the inner ring; the outer ring's actions slide under the inner ring while a
+        // stage's windows slide out in their place, and back again.
+        context.saveGState()
+        context.setShadow(offset: CGSize(width: 0, height: -10), blur: 24, color: NSColor(white: 0, alpha: 0.55).cgColor)
+        context.beginTransparencyLayer(auxiliaryInfo: nil)
         Self.outerFill.setFill()
-        NSBezierPath(ovalIn: NSRect(x: Self.centre.x - rOuter, y: Self.centre.y - rOuter, width: rOuter * 2, height: rOuter * 2)).fill()
-        NSGraphicsContext.restoreGraphicsState()
-
-        if tileOpen { drawArc() }
-
-        // Outer ring.
-        for (i, action) in Action.allCases.enumerated() {
+        NSBezierPath(ovalIn: NSRect(x: Self.centre.x - rInner, y: Self.centre.y - rInner, width: rInner * 2, height: rInner * 2)).fill()
+        let (actionsLevel, actionsAlpha) = self.actionsLevel
+        for (i, action) in Action.allCases.enumerated() where actionsAlpha > 0 {
             let a = CGFloat(i) * 45
+            let direction = point(1, a)
+            let distance = (1 - actionsLevel) * (rOuter - rInner)
+            context.saveGState()
+            context.translateBy(x: (Self.centre.x - direction.x) * distance, y: (Self.centre.y - direction.y) * distance)
+            context.setAlpha(actionsAlpha)
             let path = sector(rInner, rOuter, a - 22.5, a + 22.5)
             Self.outerFill.setFill(); path.fill()
             let highlight: CGFloat = hover == .outer(i) ? 0.14 : (isActive(action) ? 0.08 : 0)
@@ -465,7 +701,11 @@ final class RadialView: NSView {
             let dimmed = action == .desktops && model.others.isEmpty
             let colour = dimmed ? Self.secondary.withAlphaComponent(0.5) : (isActive(action) ? .white : Self.secondary)
             drawSymbol(symbol(action), at: point(178, a), size: 19, colour: colour)
+            context.restoreGState()
         }
+        drawArc(nil)
+        context.endTransparencyLayer()
+        context.restoreGState()
 
         // Inner ring.
         let list = items
@@ -492,7 +732,10 @@ final class RadialView: NSView {
                 outline.lineWidth = 2
                 Self.primary.setStroke(); outline.stroke()
             }
-            drawItem(item, at: point(rCentre + (rInner - rCentre) / 2 + 2, a))
+            // The text's width is the wedge's width a little inside where it is drawn.
+            let textRadius = rCentre + (rInner - rCentre) / 2 - 6
+            let width = min(80, 2 * textRadius * sin(min(step, 180) / 2 * .pi / 180) - 10)
+            drawItem(item, at: point(rCentre + (rInner - rCentre) / 2 + 2, a), width: width)
         }
 
         // Centre.
@@ -505,15 +748,54 @@ final class RadialView: NSView {
         drawCaption()
     }
 
-    private func drawArc() {
-        for (i, tile) in Self.tiles.enumerated() {
-            let a = -80 + CGFloat(i) * 20
-            let path = sector(rOuter + 6, rArc, a - 10, a + 10)
-            Self.outerFill.setFill(); path.fill()
-            if hover == .arc(i) { NSColor(white: 1, alpha: 0.16).setFill(); path.fill() }
-            Self.separator.setStroke(); path.lineWidth = 1; path.stroke()
-            drawTile(tile.part, at: point(262, a))
+    /// Draws the tile arc (`only` .tile, under the outer ring) or the window slots (`only`
+    /// nil, over the outer ring and under the inner ring), opening or closing.
+    private func drawArc(_ only: Arc?) {
+        for (shown, opening) in [(closingArc, false), (arc, true)] where shown != .none && (opening || closingArc != arc) {
+            if (shown == .tile) == (only == .tile) { drawArc(shown, opening: opening) }
         }
+    }
+
+    private func drawArc(_ shown: Arc, opening: Bool) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        let list = windows(shown)
+        let positions = angles(shown)
+        for (i, a) in positions.enumerated() {
+            let (level, alpha) = arcLevel(i, of: positions.count, opening: opening)
+            guard alpha > 0 else { continue }
+            // Each position keeps its final shape and slides out from under the ring inside it,
+            // which is drawn over it.
+            let tile = shown == .tile
+            let distance = (1 - level) * (tile ? rArc - rOuter : rOuter - rInner)
+            let direction = point(1, a)
+            context.saveGState()
+            context.translateBy(x: (Self.centre.x - direction.x) * distance, y: (Self.centre.y - direction.y) * distance)
+            context.setAlpha(alpha)
+            let path = tile ? sector(rOuter + 6, rArc, a - 10, a + 10) : sector(rInner, rOuter, a - 22.5, a + 22.5)
+            Self.outerFill.setFill(); path.fill()
+            let hovered = opening && (shown == .tile ? hover == .arc(i) : hover == .window(i))
+            if hovered { NSColor(white: 1, alpha: 0.16).setFill(); path.fill() }
+            Self.separator.setStroke(); path.lineWidth = 1; path.stroke()
+            if shown == .tile {
+                drawTile(Self.tiles[i].part, at: point(262, a))
+            } else if i < list.count {
+                drawWindow(list[i], at: a)
+            }
+            context.restoreGState()
+        }
+    }
+
+    /// A window's app icon, with the start of its title under it.
+    private func drawWindow(_ window: RadialModel.Window, at a: CGFloat) {
+        let p = point((rInner + rOuter) / 2 + 2, a)
+        window.icon?.draw(in: NSRect(x: p.x - 14, y: p.y - 22, width: 28, height: 28), from: .zero, operation: .sourceOver,
+                          fraction: 1, respectFlipped: true, hints: nil)
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.lineBreakMode = .byTruncatingTail
+        let text = NSAttributedString(string: window.title.isEmpty ? window.app : window.title, attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: Self.secondary, .paragraphStyle: style])
+        text.draw(with: NSRect(x: p.x - 45, y: p.y + 8, width: 90, height: 15), options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
     }
 
     private func drawTile(_ part: CGRect, at p: NSPoint) {
@@ -529,7 +811,28 @@ final class RadialView: NSView {
         NSBezierPath(roundedRect: fill, xRadius: 1.5, yRadius: 1.5).fill()
     }
 
-    private func drawItem(_ item: Item, at p: NSPoint) {
+    /// The label as it fits on one line in `width`: in full, then in a smaller size, then
+    /// with every word after the first shortened to its initial ("World S."), then as
+    /// initials ("WS"), then cut short with an ellipsis. The caption names the stage in full.
+    static func fit(_ label: String, width: CGFloat) -> (text: String, size: CGFloat) {
+        func fits(_ text: String, _ size: CGFloat) -> Bool {
+            NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: size, weight: .semibold)]).size().width <= width
+        }
+        let words = label.split(separator: " ").map(String.init)
+        var candidates = [label]
+        if words.count > 1 {
+            candidates.append(words[0] + " " + words.dropFirst().map { "\($0.prefix(1))." }.joined(separator: " "))
+            candidates.append(words.map { String($0.prefix(1)) }.joined().uppercased())
+        }
+        for text in candidates {
+            for size: CGFloat in [14, 12] where fits(text, size) { return (text, size) }
+        }
+        var cut = label
+        while cut.count > 1, !fits(cut + "…", 12) { cut.removeLast() }
+        return (cut.trimmingCharacters(in: .whitespaces) + "…", 12)
+    }
+
+    private func drawItem(_ item: Item, at p: NSPoint, width: CGFloat) {
         switch item {
         case .empty:
             break
@@ -548,19 +851,20 @@ final class RadialView: NSView {
         case .stage(let stage):
             if let label = stage.label {
                 // The label, with the stage's colour as a dot above it.
-                var top = p.y - 20
+                var top = p.y - 9
                 if let hex = stage.colour {
                     Palette.color(hex).setFill()
-                    NSBezierPath(ovalIn: NSRect(x: p.x - 6, y: p.y - 26, width: 12, height: 12)).fill()
-                    top = p.y - 10
+                    NSBezierPath(ovalIn: NSRect(x: p.x - 6, y: p.y - 20, width: 12, height: 12)).fill()
+                    top = p.y - 4
                 }
                 let style = NSMutableParagraphStyle()
                 style.alignment = .center
-                style.lineBreakMode = .byWordWrapping
-                let text = NSAttributedString(string: label, attributes: [
-                    .font: NSFont.systemFont(ofSize: 14, weight: .semibold), .foregroundColor: Self.primary, .paragraphStyle: style])
-                let box = NSRect(x: p.x - 40, y: top, width: 80, height: stage.colour == nil ? 40 : 36)
-                text.draw(with: box, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+                let fitted = Self.fit(label, width: width)
+                let text = NSAttributedString(string: fitted.text, attributes: [
+                    .font: NSFont.systemFont(ofSize: fitted.size, weight: .semibold), .paragraphStyle: style,
+                    .foregroundColor: { if case .empty = stage.target { return Self.secondary } else { return Self.primary } }()])
+                let box = NSRect(x: p.x - width / 2, y: top + (14 - fitted.size) / 2, width: width, height: 20)
+                text.draw(with: box, options: [.usesLineFragmentOrigin])
             } else {
                 let rect = NSRect(x: p.x - 15, y: p.y - 15, width: 30, height: 30)
                 if let hex = stage.colour {
@@ -618,6 +922,9 @@ final class RadialView: NSView {
         case .colour: modeName = "Colour stage"; title = "Colour for \(model.currentTitle)"; detail = "Changes its dot and wallpaper"
         }
         switch hover {
+        case .centre where arc != .none && arc != .tile:
+            title = "Back to the actions"
+            detail = "Rest here or click"
         case .centre:
             title = mode == .switchStage ? "Close" : "Back"
             detail = mode == .switchStage ? "Esc or a click outside also closes the menu" : "Back to the stages"
@@ -626,22 +933,34 @@ final class RadialView: NSView {
         case .arc(let i):
             title = Self.tiles[i].name
             detail = "Tile the \(app) window"
+        case .window(let k):
+            let list = windows(arc)
+            if list.indices.contains(k), case .windows(let i) = arc {
+                let stage = model.stages[i]
+                title = list[k].title.isEmpty ? list[k].app : list[k].title
+                detail = "\(list[k].app) · " + (stage.isCurrent ? "click to bring it to the front" : "click to switch to \(stage.label ?? "its stage") and show it")
+            }
         case .inner(let i):
             switch items[i] {
             case .empty: title = "Empty"; detail = "Up to 8 stages per desktop"
             case .colour(let name, let hex): title = name; detail = hex == model.currentColour ? "Current colour" : "Colour \(model.currentTitle)"
             case .stage(let stage):
-                let key = stage.number.map { "⌃⌥\($0)" }
+                let key = stage.shortcut
                 switch effectiveMode {
                 case .move:
                     title = "Move the \(app) window to \(stage.title)"
-                    detail = stage.isCurrent ? "It is already in this stage" : "Keeps its size and position"
+                    if case .empty = stage.target {
+                        detail = "No open windows · the window becomes this stage"
+                    } else {
+                        detail = stage.isCurrent ? "It is already in this stage" : "Keeps its size and position"
+                    }
                 case .desktops:
                     title = stage.title
                     detail = [stage.place, key].compactMap { $0 }.joined(separator: " · ")
                 default:
                     title = stage.label ?? "\(stage.position) · \(stage.title)"
                     detail = stage.isCurrent ? "Current stage" : "Switch" + (key.map { " · \($0)" } ?? "")
+                    if !stage.windows.isEmpty { detail += " · rest here to see its windows" }
                 }
             }
         case .none:
@@ -674,6 +993,20 @@ final class RadialView: NSView {
 }
 
 extension Actions {
+    /// Shows one window: switches to its stage the way StageKeeper always does, then brings
+    /// the window to the front. Picking a window in Mission Control takes it out of its stage
+    /// instead, so this is the way to reach a window hidden behind others.
+    static func showWindow(_ id: CGWindowID) throws {
+        let snapshot = try Snapshot.take()
+        guard let window = snapshot.windows[id] else { throw StageError.other("That window is no longer open.") }
+        if let stage = snapshot.stages.first(where: { $0.windowIDs.contains(id) }), stage.kind != .current {
+            try switchTo(stage, in: snapshot)
+            usleep(150_000)
+        }
+        AX.focus(window)
+        Log.write("Showed the \(window.appName) window \"\(window.title)\".")
+    }
+
     /// Puts a window of the current stage (the front one when `chosen` is nil) in a part of its screen. `part` is a fraction of the screen's usable
     /// area (without the menu bar and Dock), measured from its top-left corner. A window over the
     /// strip's area makes Stage Manager slide the strip away until the pointer reaches the edge.

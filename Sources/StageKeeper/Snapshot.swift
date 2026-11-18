@@ -111,13 +111,48 @@ struct Snapshot {
         return items
     }
 
+    /// Apps that did not answer Accessibility: how many reads in a row they missed, and when to
+    /// ask them again. An app that never answers (Solo, for one) costs the full one-second
+    /// timeout on every read, which made every StageKeeper action and the radial menu a second
+    /// slower. An app that is only busy (Word opening a document) misses one read, so an app is
+    /// skipped only after two misses in a row, first for 30 seconds, doubling up to 5 minutes,
+    /// and never while it is the frontmost app; one answer clears its record.
+    private struct Unresponsive { var misses = 0; var skips = 0; var until = Date.distantPast }
+    nonisolated(unsafe) private static var unresponsive: [pid_t: Unresponsive] = [:]
+    private static let unresponsiveLock = NSLock()
+
     private static func readWindows() -> ([CGWindowID: LiveWindow], [CGWindowID]) {
         var windows: [CGWindowID: LiveWindow] = [:]
         var order: [CGWindowID] = []
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
             guard let bundleID = app.bundleIdentifier else { continue }
-            let axApp = AX.application(app.processIdentifier)
-            for element in AX.elements(axApp, kAXWindowsAttribute) {
+            let pid = app.processIdentifier
+            unresponsiveLock.lock()
+            let record = unresponsive[pid]
+            unresponsiveLock.unlock()
+            if let record, record.until > Date(), !app.isActive { continue }
+            let axApp = AX.application(pid)
+            let asked = Date()
+            let elements = AX.elements(axApp, kAXWindowsAttribute)
+            let missed = elements.isEmpty && Date().timeIntervalSince(asked) > 0.5
+            unresponsiveLock.lock()
+            if missed {
+                var next = record ?? Unresponsive()
+                next.misses += 1
+                if next.misses >= 2, !app.isActive {
+                    let seconds = min(30 * pow(2, Double(next.skips)), 300)
+                    next.skips += 1
+                    next.misses = 0
+                    next.until = Date().addingTimeInterval(seconds)
+                    Log.write("\(app.localizedName ?? bundleID) did not answer Accessibility twice; skipping it for \(Int(seconds)) s.")
+                }
+                unresponsive[pid] = next
+            } else if record != nil {
+                unresponsive[pid] = nil
+            }
+            unresponsiveLock.unlock()
+            if missed { continue }
+            for element in elements {
                 guard AX.string(element, kAXSubroleAttribute) == kAXStandardWindowSubrole,
                       AX.bool(element, kAXMinimizedAttribute) != true,
                       let id = AX.windowID(element), windows[id] == nil else { continue }
@@ -134,6 +169,29 @@ struct Snapshot {
             }
         }
         return (windows, order)
+    }
+
+    /// How long each part of reading the stages takes, for finding what makes StageKeeper slow.
+    static func timings() -> String {
+        func time(_ body: () -> Void) -> String {
+            let start = Date(); body(); return String(format: "%.0f ms", Date().timeIntervalSince(start) * 1000)
+        }
+        var lines = ["strip: " + time { _ = try? readStrip() }]
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            var count = 0
+            let spent = time {
+                let axApp = AX.application(app.processIdentifier)
+                for element in AX.elements(axApp, kAXWindowsAttribute) {
+                    count += 1
+                    _ = AX.string(element, kAXSubroleAttribute); _ = AX.bool(element, kAXMinimizedAttribute)
+                    _ = AX.windowID(element); _ = AX.string(element, kAXTitleAttribute); _ = AX.frame(element)
+                }
+            }
+            lines.append("\(app.localizedName ?? "?"): \(spent), \(count) windows")
+        }
+        lines.append("on-screen list: " + time { _ = onScreenWindowIDs() })
+        lines.append("whole snapshot: " + time { _ = try? take() })
+        return lines.joined(separator: "\n")
     }
 
     /// Normal-level windows front to back, including windows Stage Manager has moved off screen.

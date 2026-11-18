@@ -1,8 +1,13 @@
 import AppKit
 
-/// The colours offered in the menu. Any "#RRGGBB" value also works from the command line.
+/// The colours offered in the menu, as edited in Settings. Any "#RRGGBB" value also works from
+/// the command line.
 enum Palette {
-    static let colours: [(name: String, hex: String)] = [
+    static var colours: [(name: String, hex: String)] {
+        Settings.current.palette.map { $0.map { ($0.name, $0.hex) } } ?? defaults
+    }
+
+    static let defaults: [(name: String, hex: String)] = [
         ("Red", "#C8383E"),
         ("Orange", "#D9661F"),
         ("Yellow", "#D9A21F"),

@@ -12,6 +12,7 @@ Usage:
                                 #RRGGBB, or none.
   stagekeeper switch <label|n>  Switch to a labelled stage by label or shortcut number (asks the menu-bar app).
   stagekeeper agent             Run the menu-bar item; restores once per boot.
+  stagekeeper reveal            Put back every window StageKeeper hid (Stage Manager off).
 
 Layouts:     \(Paths.desktops.path) (one file per desktop)
 Log:         \(Paths.log.path)
@@ -63,6 +64,8 @@ case "switch":
         // The menu-bar app does the switch, so only it needs Accessibility permission.
         NSWorkspace.shared.open(URL(string: "stagekeeper://switch/\(id.uuidString)")!)
     }
+case "reveal":
+    runCLI { Engine.revealAll() }
 case "agent":
     Log.echo = false
     let app = NSApplication.shared

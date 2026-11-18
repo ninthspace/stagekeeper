@@ -59,7 +59,14 @@ struct Snapshot {
 
     static func take() throws -> Snapshot {
         guard AX.isTrusted(prompt: false) else { throw StageError.notTrusted }
-        guard stageManagerEnabled else { throw StageError.stageManagerOff }
+        if Engine.active {
+            let (windows, order) = readWindows()
+            let (current, others) = Engine.stages(windows, order: order)
+            var stages: [LiveStage] = []
+            if !current.isEmpty { stages.append(LiveStage(kind: .current, windowIDs: current)) }
+            stages += others.map { LiveStage(kind: .strip, windowIDs: $0) }
+            return Snapshot(windows: windows, order: order, strip: [], current: current, stages: stages)
+        }
 
         let strip = try readStrip()
         let (windows, order) = readWindows()

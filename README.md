@@ -112,6 +112,20 @@ stagekeeper switch <label|n>    Switch to a labelled stage by label or shortcut 
 stagekeeper agent               Run the menu-bar item.
 ```
 
+## Without Stage Manager (prototype)
+
+With Stage Manager turned off (System Settings › Desktop & Dock › Stage Manager), StageKeeper keeps the stages itself. A stage is a group of windows. Switching moves the current stage's windows into the bottom-right corner of the screen, with one point showing, and moves the new stage's windows back to where they were. There is no strip: switch with the radial menu, the menu-bar menu, the shortcuts and the Dock apps.
+
+- On first use the stages come from the last save on that desktop. A window StageKeeper has not seen before joins the current stage.
+- Move in the radial menu moves a window into any stage, including a labelled stage with no open windows. Its last slot, **New stage**, makes a stage of the window alone.
+- Bringing a hidden window forward yourself (⌘Tab, the Dock, a window menu) switches to its stage.
+- When StageKeeper quits, or Stage Manager is turned back on, hidden windows are put back on screen. `stagekeeper reveal` does the same by hand.
+- A new window joins the current stage within about half a second. One that opens mostly off screen (apps place a new window by their last one, which may be hidden) is moved to the middle of the screen.
+- Picking a window from an app's Dock menu, Window menu or Mission Control switches to its stage.
+- Mission Control shows hidden windows too, small, because they sit in the screen's corner. Turning on System Settings › Desktop & Dock › Mission Control › "Group windows by application" lays them out larger.
+- Restore after a restart is not done yet without Stage Manager.
+- The state is in `~/Library/Application Support/StageKeeper/engine.json`.
+
 ## Files
 
 - Layouts: `~/Library/Application Support/StageKeeper/Desktops/`, one file per desktop named after the desktop's ID (`main.json` for the first desktop). The previous save of each is in `<name>.previous.json`. A `layout.json` from an earlier version is moved to `Desktops/main.json`.

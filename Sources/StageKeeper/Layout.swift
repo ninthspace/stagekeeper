@@ -423,6 +423,17 @@ enum Actions {
     /// Fetch Pinned Windows (⌃⌥0) does that: an ordinary switch leaves pinned windows where they
     /// are, because a drag that takes a whole stage instead of one window merges two stages.
     static func switchTo(_ stage: LiveStage, in snapshot: Snapshot, carryPins: Bool = false) throws {
+        if Engine.active {
+            guard stage.kind != .current, let first = stage.windowIDs.first else { return }
+            if carryPins {
+                let pinned = Pins.resolve(snapshot).filter { snapshot.current.contains($0) }
+                if !pinned.isEmpty { try Engine.move(pinned, toStageWith: first) }
+            }
+            try Engine.activate(stageWith: first)
+            let names = stage.windowIDs.compactMap { snapshot.windows[$0]?.appName }
+            Log.write("Switched to the stage with \(Array(Set(names)).sorted().joined(separator: ", ")).")
+            return
+        }
         guard stage.kind != .current, let id = FocusHistory.frontmost(of: stage.windowIDs) else { return }
         let pinned = carryPins ? Pins.resolve(snapshot).filter { snapshot.current.contains($0) } : []
         var frames: [CGWindowID: CGRect] = [:]
@@ -472,6 +483,14 @@ enum Actions {
     static func fetchPinned() throws {
         var snapshot = try Snapshot.take()
         guard let home = frontWindow(snapshot) else { throw StageError.other("There is no current stage to fetch into.") }
+        if Engine.active {
+            let away = Pins.resolve(snapshot).filter { !snapshot.current.contains($0) }
+            guard !away.isEmpty else { throw StageError.other("No bookmarked windows are in other stages on this desktop.") }
+            try Engine.move(away, toStageWith: home)
+            Engine.bringForward(home)
+            Log.write("Fetched \(away.count) bookmarked windows.")
+            return
+        }
         let away = Pins.resolve(snapshot).filter { !snapshot.current.contains($0) && snapshot.stripItem(containing: $0) != nil }
         guard !away.isEmpty else { throw StageError.other("No bookmarked windows are in other stages on this desktop.") }
         let groups = stageGroups(snapshot, leaving: Set(Pins.resolve(snapshot)))
@@ -569,6 +588,12 @@ enum Actions {
         guard let target = snapshot.stages.first(where: { $0.windowIDs.contains(targetWindow) }), target.kind != .current else {
             throw StageError.other("That stage is no longer open.")
         }
+        if Engine.active {
+            try Engine.move([front], toStageWith: targetWindow)
+            try Engine.activate(stageWith: targetWindow, focus: front)
+            Log.write("Moved the \(name) window to another stage.")
+            return
+        }
         try switchTo(target, in: snapshot)
         // While Stage Manager animates the switch, the old stage's windows are still on screen
         // and read as current. Wait for the window to reach the strip.
@@ -633,6 +658,22 @@ enum Actions {
         }
     }
 
+    /// Moves a window of the current stage (the front one when `chosen` is nil) into a new,
+    /// unlabelled stage of its own. Only without Stage Manager, which gives no way to do it.
+    static func moveWindowToNewStage(_ chosen: CGWindowID?) throws {
+        guard Engine.active else { throw StageError.other("A new stage can only be made with Stage Manager turned off.") }
+        let snapshot = try Snapshot.take()
+        guard let front = chosen.flatMap({ snapshot.current.contains($0) ? $0 : nil }) ?? frontWindow(snapshot),
+              let window = snapshot.windows[front] else {
+            throw StageError.other("The current stage has no window to move.")
+        }
+        guard snapshot.current.count > 1 else {
+            throw StageError.other("The \(window.appName) window is already the only window in its stage.")
+        }
+        try Engine.move([front], toStageWith: nil)
+        Log.write("Moved the \(window.appName) window \"\(window.title)\" to a new stage.")
+    }
+
     /// Moves a window of the current stage (the front one when `chosen` is nil) into a labelled
     /// stage that has no open windows. Stage Manager has no empty stages, so this works only for a
     /// window alone in its stage: the saved stage is pointed at it so its label, colour and
@@ -649,7 +690,9 @@ enum Actions {
         let label = found.layout.stages[found.index].label ?? "that stage"
         // Stage Manager gives no way to split a window off: the strip hides while a dragged window
         // covers it, and a minimised window rejoins the current stage when restored.
-        guard snapshot.current.count == 1 else {
+        if Engine.active, snapshot.current.count > 1 {
+            try Engine.move([front], toStageWith: nil)
+        } else if snapshot.current.count > 1 {
             throw StageError.other("Only a window that is alone in its stage can move into \(label): Stage Manager gives StageKeeper no way to split a window off into a new stage. Move this stage's other windows elsewhere first.")
         }
         var layout = found.layout
@@ -659,7 +702,7 @@ enum Actions {
             layout.stages[index].windows.removeAll { $0.windowID == window.id }
         }
         layout.stages[found.index].windows = [saved]
-        layout.stages[found.index].current = true
+        layout.stages[found.index].current = snapshot.current.count == 1
         try LayoutStore.write(layout, keepPrevious: true)
         Log.write("Moved the \(window.appName) window into the empty \"\(label)\" stage.")
     }

@@ -92,6 +92,11 @@ final class RadialMenu {
         hooks.perform { try Actions.moveFrontWindow(toStageWith: windowID, window: window) }
     }
 
+    func moveToNewStage(_ window: CGWindowID?) {
+        close()
+        hooks.perform { try Actions.moveWindowToNewStage(window) }
+    }
+
     func moveToEmpty(_ window: CGWindowID?, _ id: UUID) {
         close()
         hooks.perform { try Actions.moveWindow(window, toEmptyStage: id) }
@@ -188,6 +193,8 @@ struct RadialModel {
     var empty: [Stage] = []
     /// The Move ring: labelled stages, open or not, in shortcut order, then unlabelled ones.
     var moveTargets: [Stage] = []
+    /// Whether Move offers a new stage: only StageKeeper's own stages can make one.
+    var canMakeStages = Engine.active
     var others: [Stage] = []
     /// The window the menu acts on: the current stage's window under the pointer when the menu
     /// opened, else the front window.
@@ -301,7 +308,7 @@ final class RadialView: NSView {
     /// of the inner ring.
     private enum Arc: Equatable { case none, tile, windows(Int) }
     private enum Item {
-        case stage(RadialModel.Stage), colour(String, String?), empty
+        case stage(RadialModel.Stage), colour(String, String?), empty, newStage
         var isEmpty: Bool { if case .empty = self { return true } else { return false } }
     }
     private enum Action: CaseIterable { case tile, bookmark, fetch, desktops, move, colour, label, save }
@@ -461,7 +468,11 @@ final class RadialView: NSView {
     private var items: [Item] {
         switch effectiveMode {
         case .switchStage: return pad(model.stages.map { .stage($0) })
-        case .move: return pad(model.moveTargets.map { .stage($0) })
+        case .move:
+            guard model.canMakeStages else { return pad(model.moveTargets.map { .stage($0) }) }
+            // The last slot always makes a new stage, so a full ring still offers it.
+            let targets = model.moveTargets.prefix(7).map { Item.stage($0) }
+            return targets + Array(repeating: .empty, count: 7 - targets.count) + [.newStage]
         case .desktops: return pad(model.others.map { .stage($0) })
         case .colour: return Palette.colours.map { .colour($0.name, $0.hex) } + [.colour("No colour", nil)]
         }
@@ -629,6 +640,7 @@ final class RadialView: NSView {
         case .inner(let i):
             switch items[i] {
             case .empty: break
+            case .newStage: menu.moveToNewStage(model.window)
             case .colour(_, let hex): menu.colour(hex)
             case .stage(let stage):
                 switch (effectiveMode, stage.target) {
@@ -725,7 +737,7 @@ final class RadialView: NSView {
             switch item {
             case .stage(let stage): tint = stage.colour.map { Palette.color($0) }
             case .colour(_, let hex): tint = hex.map { Palette.color($0) }
-            case .empty: break
+            case .empty, .newStage: break
             }
             if let tint {
                 tint.withAlphaComponent(hovered ? 0.42 : 0.2).setFill(); path.fill()
@@ -842,6 +854,9 @@ final class RadialView: NSView {
         switch item {
         case .empty:
             break
+        case .newStage:
+            drawSymbol("plus", at: NSPoint(x: p.x, y: p.y - 8), size: 16, colour: Self.primary)
+            draw("New stage", centredAt: NSPoint(x: p.x, y: p.y + 12), font: .systemFont(ofSize: 12, weight: .semibold), colour: Self.primary)
         case .colour(_, let hex):
             let rect = NSRect(x: p.x - 13, y: p.y - 13, width: 26, height: 26)
             if let hex {
@@ -949,6 +964,7 @@ final class RadialView: NSView {
         case .inner(let i):
             switch items[i] {
             case .empty: title = "Empty"; detail = "Up to 8 stages per desktop"
+            case .newStage: title = "Move the \(app) window to a new stage"; detail = "It becomes a stage of its own"
             case .colour(let name, let hex): title = name; detail = hex == model.currentColour ? "Current colour" : "Colour \(model.currentTitle)"
             case .stage(let stage):
                 let key = stage.shortcut

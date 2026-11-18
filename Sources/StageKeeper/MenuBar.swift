@@ -32,6 +32,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var item: NSStatusItem!
     private var busy = false
     private var timer: Timer?
+    private var followTimer: Timer?
+    private var following = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -69,6 +71,20 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         Wallpaper.apply(nil)
+        Engine.revealAll()
+    }
+
+    /// Quitting by signal (install.sh, `kill`) skips applicationWillTerminate, which would leave
+    /// hidden windows off screen.
+    private var signalSources: [DispatchSourceSignal] = []
+    private func revealOnSignals() {
+        for number in [SIGTERM, SIGINT, SIGHUP] {
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler { Engine.revealAll(); exit(0) }
+            source.resume()
+            signalSources.append(source)
+        }
     }
 
     /// Links from the Dock apps: stagekeeper://switch/<stage id>.
@@ -85,6 +101,22 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func start() {
         started = true
+        revealOnSignals()
+        if Engine.active {
+            Log.write("Stage Manager is off; StageKeeper keeps the stages itself.")
+            DispatchQueue.global(qos: .userInitiated).async { Engine.apply() }
+        }
+        // Picking a window from an app's Dock menu or Window menu changes the focused window
+        // without activating an app, so no notification comes: check the focused window often.
+        followTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
+            guard let self, Engine.active, !self.following else { return }
+            self.following = true
+            DispatchQueue.global(qos: .userInitiated).async {
+                Engine.noticeNewWindows()
+                Engine.follow()
+                DispatchQueue.main.async { self.following = false }
+            }
+        }
         startRadialMenu()
         DockApps.sync()
         refreshTitle()
@@ -162,6 +194,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// A stage switch activates an app before Stage Manager finishes moving the windows,
     /// so read the stages again once the animation is over.
     @objc private func appActivated() {
+        if Engine.active { DispatchQueue.global(qos: .userInitiated).async { Engine.follow() } }
         refreshTitle()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.refreshTitle() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.refreshTitle() }
@@ -170,6 +203,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Updates the menu-bar title, the wallpaper and the registered shortcuts.
     @objc private func refreshTitle() {
         guard !busy, let button = item.button else { return }
+        // Turning Stage Manager back on leaves StageKeeper's hidden windows off screen.
+        if !Engine.active, Engine.hasHidden { Engine.revealAll() }
         let layout = LayoutStore.load()
         Hotkeys.register(Shortcuts.wanted(fetchActive: !Pins.load().isEmpty))
         guard let snapshot = try? Snapshot.take() else {
@@ -440,6 +475,10 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func restore() {
         guard !busy else { return }
+        guard !Engine.active else {
+            Log.write("Restore skipped: it rebuilds Stage Manager's stages, and Stage Manager is off.")
+            return
+        }
         busy = true
         item.button?.title = " Restoring…"
         DispatchQueue.global(qos: .userInitiated).async {

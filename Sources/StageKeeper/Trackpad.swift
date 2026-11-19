@@ -20,6 +20,12 @@ enum Trackpad {
     /// `tapTime` without moving and without pressing the trackpad. macOS sends no event for a
     /// tap of more than two fingers, so it is recognised here from the raw finger data.
     nonisolated(unsafe) static var onTap: (() -> Void)?
+    /// Called on the main thread after four fingers swipe down: they move down at least
+    /// `swipeDistance` of the trackpad's height, more down than sideways, without a press.
+    /// macOS uses this gesture for App Exposé only when that is turned on in Trackpad settings.
+    nonisolated(unsafe) static var onSwipeDown: (() -> Void)?
+    private static let swipeDistance: Float = 0.15
+    private static let swipeTime = 1.0
     /// Set by the event tap when the trackpad is pressed, so a four-finger click is not also
     /// taken as a tap.
     nonisolated(unsafe) static var pressedDuringTouch = false
@@ -30,6 +36,7 @@ enum Trackpad {
     nonisolated(unsafe) private static var mostFingers = 0
     nonisolated(unsafe) private static var startCentre: (Float, Float)?
     nonisolated(unsafe) private static var moved = false
+    nonisolated(unsafe) private static var lastCentre: (Float, Float)?
 
     /// Bytes per finger in the framework's touch array, and where the fields used here sit:
     /// the touch state (4 = making contact, 5 = touching) and the position as a fraction of the
@@ -58,14 +65,19 @@ enum Trackpad {
             if touching > mostFingers {
                 mostFingers = touching
                 startCentre = centre
-            } else if touching == mostFingers, let start = startCentre,
-                      abs(centre.0 - start.0) > tapMovement || abs(centre.1 - start.1) > tapMovement {
-                moved = true
+                lastCentre = centre
+            } else if touching == mostFingers, let start = startCentre {
+                lastCentre = centre
+                if abs(centre.0 - start.0) > tapMovement || abs(centre.1 - start.1) > tapMovement { moved = true }
             }
             return
         }
         let held = time - touchStart
-        if mostFingers == 4, !moved, !pressedDuringTouch, held < tapTime {
+        // The position runs from 0 at the bottom of the trackpad to 1 at the top.
+        let swipe = startCentre.flatMap { start in lastCentre.map { ($0.0 - start.0, $0.1 - start.1) } }
+        if mostFingers == 4, !pressedDuringTouch, held < swipeTime, let swipe, -swipe.1 >= swipeDistance, -swipe.1 > 2 * abs(swipe.0) {
+            DispatchQueue.main.async { onSwipeDown?() }
+        } else if mostFingers == 4, !moved, !pressedDuringTouch, held < tapTime {
             DispatchQueue.main.async { onTap?() }
         } else if mostFingers >= 3, !pressedDuringTouch {
             // Says why a touch of several fingers was not taken as a tap, to tune the limits.
@@ -78,6 +90,7 @@ enum Trackpad {
         }
         mostFingers = 0
         startCentre = nil
+        lastCentre = nil
     }
 
     /// Starts listening to every trackpad, first stopping any devices from an earlier start.
@@ -85,6 +98,9 @@ enum Trackpad {
     /// called again on wake and unlock. Returns false when the framework is unavailable.
     @discardableResult
     static func start() -> Bool {
+        mostFingers = 0
+        startCentre = nil
+        lastCentre = nil
         guard let framework = dlopen("/System/Library/PrivateFrameworks/MultitouchSupport.framework/MultitouchSupport", RTLD_NOW),
               let createPointer = dlsym(framework, "MTDeviceCreateList"),
               let registerPointer = dlsym(framework, "MTRegisterContactFrameCallback"),
@@ -173,8 +189,8 @@ enum FourFingerClick {
                 FourFingerClick.swallowing = true
                 Trackpad.pressedDuringTouch = true
                 let location = event.location
-                let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
-                DispatchQueue.main.async { FourFingerClick.handler?(NSPoint(x: location.x, y: primaryHeight - location.y)) }
+                let point = Screens.toAX(location)
+                DispatchQueue.main.async { FourFingerClick.handler?(point) }
                 return nil
             case .leftMouseDragged where FourFingerClick.swallowing:
                 return nil

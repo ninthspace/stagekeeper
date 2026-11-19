@@ -16,6 +16,8 @@ enum Everywhere {
     private static let stagesNeeded = 3
 
     static func ids() -> Set<CGWindowID> {
+        // StageKeeper's own stages hide every window of a stage, so none shows everywhere.
+        guard !Engine.active else { return [] }
         let state = AgentState.load()
         guard System.sameBoot(state.everywhereBoot) else { return [] }
         return Set(state.everywhere ?? [])
@@ -23,6 +25,7 @@ enum Everywhere {
 
     /// Called with each stage read the menu-bar app makes for its title.
     static func note(_ snapshot: Snapshot) {
+        guard !Engine.active else { return }
         let current = Set(snapshot.current)
         lock.lock(); defer { lock.unlock() }
         defer { lastCurrent = current }

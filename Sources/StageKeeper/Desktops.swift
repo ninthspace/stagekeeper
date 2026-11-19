@@ -44,6 +44,21 @@ enum Desktops {
         return result
     }
 
+    private typealias SpacesForWindows = @convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?
+
+    /// The windows of `ids` on the active desktop. All of them when the private calls are
+    /// unavailable, or when a window's desktop cannot be read.
+    static func onActiveSpace(_ ids: [CGWindowID]) -> Set<CGWindowID> {
+        guard let connection, let active = symbol("SLSGetActiveSpace", ActiveSpace.self),
+              let spaces = symbol("SLSCopySpacesForWindows", SpacesForWindows.self) else { return Set(ids) }
+        let space = active(connection)
+        return Set(ids.filter { id in
+            guard let found = spaces(connection, 0x7, [NSNumber(value: id)] as CFArray)?.takeRetainedValue() as? [NSNumber],
+                  !found.isEmpty else { return true }
+            return found.contains { $0.intValue == space }
+        })
+    }
+
     /// The desktop showing now, or "main" when the private calls are unavailable.
     static func current() -> Desktop {
         let fallback = Desktop(key: "main", number: 1, spaceID: 0)

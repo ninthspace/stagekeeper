@@ -62,6 +62,14 @@ enum AX {
 
     /// Makes one window the frontmost window of the frontmost app. Stage Manager then switches
     /// to the stage that holds the window, with no need to click the strip.
+    /// The frontmost app and its focused window.
+    static func focusedWindow() -> (NSRunningApplication, CGWindowID)? {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              let element = value(application(app.processIdentifier), kAXFocusedWindowAttribute),
+              let id = windowID(element as! AXUIElement) else { return nil }
+        return (app, id)
+    }
+
     static func focus(_ window: LiveWindow) {
         perform(window.element, kAXRaiseAction)
         AXUIElementSetAttributeValue(window.element, kAXMainAttribute as CFString, kCFBooleanTrue)

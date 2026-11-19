@@ -18,13 +18,43 @@ final class RadialMenu {
     private var panel: RadialPanel?
     private var outsideClicks: Any?
 
+    private lazy var overview = Overview(perform: hooks.perform)
+
     init(hooks: Hooks) { self.hooks = hooks }
 
+    func showOverview() {
+        close()
+        do { try overview.open() } catch { hooks.notify("\(error)") }
+    }
+
+    /// Opens the All stages view, or closes it when it is open. A four-finger swipe down.
+    func toggleOverview() {
+        if overview.isOpen { overview.close() } else { showOverview() }
+    }
+
     func toggle(at point: NSPoint) {
+        if overview.isOpen { overview.close(); return }
         if panel != nil { close(animated: true) } else { open(at: point) }
     }
 
+    private var opening = false
+
+    /// Opens the menu once the stages match the focused window, which may switch stages: done
+    /// off the main thread, since moving windows waits on their apps.
     func open(at point: NSPoint) {
+        guard !opening else { return }
+        opening = true
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            Engine.matchFocus()
+            DispatchQueue.main.async {
+                self?.opening = false
+                self?.present(at: point)
+            }
+        }
+    }
+
+    private func present(at point: NSPoint) {
+        guard panel == nil else { return }
         let model: RadialModel
         do { model = try RadialModel.read(at: point) } catch { hooks.notify("\(error)"); return }
         let size = RadialView.size
@@ -212,8 +242,7 @@ struct RadialModel {
         let indices = Matcher.savedIndices(layout, snapshot)
         let numbers = Dictionary(uniqueKeysWithValues: Actions.numbered().prefix(9).enumerated().map { ($1.id!, $0 + 1) })
         let shortcuts = Shortcuts.stages()
-        var labelled: [Stage] = []
-        var unlabelled: [Stage] = []
+        var all: [(stage: Stage, ids: [CGWindowID])] = []
         // Overflow stages are ones the strip has no room for; switching to them works the same way.
         let everywhere = Everywhere.ids()
         var icons: [pid_t: NSImage] = [:]
@@ -235,19 +264,20 @@ struct RadialModel {
                 model.currentTitle = title
                 model.currentColour = saved?.color
             }
-            if saved?.label != nil { labelled.append(entry) } else { unlabelled.append(entry) }
+            all.append((entry, stage.windowIDs))
         }
-        labelled.sort { ($0.number ?? 99) < ($1.number ?? 99) }
-        model.stages = Array((labelled + unlabelled).prefix(8))
+        let byUse = FocusHistory.byRecentUse(all) { $0.ids }.map(\.stage)
+        model.stages = Array(byUse.prefix(8))
         for i in model.stages.indices { model.stages[i].position = i + 1 }
         for (index, saved) in (layout?.stages ?? []).enumerated() where saved.label != nil && saved.id != nil && !indices.contains(index) {
             model.empty.append(Stage(title: saved.label!, label: saved.label, number: numbers[saved.id!], shortcut: shortcuts[saved.id!]?.display, colour: saved.color,
                                      isCurrent: false, initial: "", place: nil, target: .empty(saved.id!)))
         }
-        // Labelled stages with no open windows come before unlabelled ones, so a full desktop
-        // cannot push them off the Move ring.
-        model.moveTargets = Array(((model.stages.filter { $0.label != nil } + model.empty).sorted { ($0.number ?? 99) < ($1.number ?? 99) }
-            + model.stages.filter { $0.label == nil }).prefix(8))
+        // Stages by recent use, then the labelled stages with no open windows, which keep their
+        // slots so a desktop with many stages cannot push them off the Move ring.
+        let emptySlots = min(model.empty.count, 4)
+        let liveSlots = (model.canMakeStages ? 7 : 8) - emptySlots
+        model.moveTargets = Array(byUse.prefix(liveSlots)) + model.empty.prefix(emptySlots)
 
         let desktops = Desktops.all()
         let current = Desktops.current().key
@@ -631,7 +661,7 @@ final class RadialView: NSView {
             menu.close(animated: true)
         case .centre:
             if case .windows = arc { arc = .none; needsDisplay = true }
-            else if mode == .switchStage { menu.close(animated: true) } else { mode = .switchStage; needsDisplay = true }
+            else if mode == .switchStage { menu.showOverview() } else { mode = .switchStage; needsDisplay = true }
         case .arc(let i):
             menu.tile(model.window, Self.tiles[i].part)
         case .window(let k):
@@ -761,7 +791,7 @@ final class RadialView: NSView {
         Self.centreFill.setFill()
         NSBezierPath(ovalIn: centreRect).fill()
         if hover == .centre { NSColor(white: 1, alpha: 0.12).setFill(); NSBezierPath(ovalIn: centreRect).fill() }
-        drawSymbol(mode == .switchStage ? "xmark" : "chevron.left", at: Self.centre, size: 20, colour: Self.primary)
+        drawSymbol(mode == .switchStage ? "square.grid.2x2" : "chevron.left", at: Self.centre, size: 20, colour: Self.primary)
 
         drawCaption()
     }
@@ -947,8 +977,8 @@ final class RadialView: NSView {
             title = "Back to the actions"
             detail = "Rest here or click"
         case .centre:
-            title = mode == .switchStage ? "Close" : "Back"
-            detail = mode == .switchStage ? "Esc or a click outside also closes the menu" : "Back to the stages"
+            title = mode == .switchStage ? "All stages" : "Back"
+            detail = mode == .switchStage ? "See every stage and pick one · Esc or a click outside closes the menu" : "Back to the stages"
         case .outer(let i):
             (title, detail) = describe(Action.allCases[i])
         case .arc(let i):

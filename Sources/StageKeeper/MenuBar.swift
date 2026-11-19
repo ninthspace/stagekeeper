@@ -104,19 +104,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         revealOnSignals()
         if Engine.active {
             Log.write("Stage Manager is off; StageKeeper keeps the stages itself.")
-            DispatchQueue.global(qos: .userInitiated).async { Engine.apply() }
+            DispatchQueue.global(qos: .userInitiated).async { Engine.reconcile(force: true) }
         }
         // Picking a window from an app's Dock menu or Window menu changes the focused window
         // without activating an app, so no notification comes: check the focused window often.
-        followTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
-            guard let self, Engine.active, !self.following else { return }
-            self.following = true
-            DispatchQueue.global(qos: .userInitiated).async {
-                Engine.noticeNewWindows()
-                Engine.follow()
-                DispatchQueue.main.async { self.following = false }
-            }
-        }
+        followTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in self?.engineTick() }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         startRadialMenu()
         DockApps.sync()
         refreshTitle()
@@ -140,6 +134,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         radial = menu
         FourFingerClick.handler = { [weak menu] point in menu?.toggle(at: point) }
         Trackpad.onTap = { [weak menu] in menu?.toggle(at: NSEvent.mouseLocation) }
+        Trackpad.onSwipeDown = { [weak menu] in menu?.toggleOverview() }
         if !Trackpad.start() { Log.write("No trackpad found, so the radial menu cannot open.") }
         if !FourFingerClick.install() { Log.write("Could not watch for four-finger clicks.") }
         // The trackpad stops sending touches to StageKeeper after sleep or a screen lock.
@@ -169,6 +164,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var trackpadRestart: DispatchWorkItem?
 
     @objc private func desktopChanged() {
+        if !Engine.active, Engine.hasHidden { DispatchQueue.global(qos: .userInitiated).async { Engine.revealAll() } }
         appActivated()
         guard started else { return }
         restoreDesktopOnce(after: 1.5)
@@ -178,6 +174,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Manager only exposes the stages of the desktop that is showing, so each desktop is
     /// restored when you first go to it.
     private func restoreDesktopOnce(after delay: Double) {
+        // StageKeeper's own stages are kept as they are; nothing to restore.
+        guard !Engine.active else { return }
         let desktop = Desktops.current().key
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, Desktops.current().key == desktop, LayoutStore.load(desktop) != nil else { return }
@@ -189,12 +187,38 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private var ticks = 0
+
+    /// Every 0.4 s and on each app activation, off the main thread, one at a time: adds new
+    /// windows to a stage, follows focus to another stage, and every 2 s checks the screen still
+    /// matches the stages.
+    private func engineTick() {
+        guard Engine.active, !following else { return }
+        following = true
+        ticks += 1
+        let check = ticks % 5 == 0
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            Engine.noticeNewWindows()
+            Engine.follow()
+            if check { Engine.reconcile() }
+            DispatchQueue.main.async { self?.following = false }
+        }
+    }
+
+    /// Displays came or went, or were rearranged: hidden windows move to the new corner. Stage
+    /// Manager turned back on: hidden windows on the desktop that now shows go back.
+    @objc private func screensChanged() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            if Engine.active { Engine.reconcile(force: true) } else if Engine.hasHidden { Engine.revealAll() }
+        }
+    }
+
     private static let symbol = NSImage(systemSymbolName: "rectangle.stack", accessibilityDescription: "StageKeeper")
 
     /// A stage switch activates an app before Stage Manager finishes moving the windows,
     /// so read the stages again once the animation is over.
     @objc private func appActivated() {
-        if Engine.active { DispatchQueue.global(qos: .userInitiated).async { Engine.follow() } }
+        engineTick()
         refreshTitle()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.refreshTitle() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.refreshTitle() }

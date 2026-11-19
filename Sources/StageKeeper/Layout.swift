@@ -145,6 +145,7 @@ enum LayoutStore {
             try? FileManager.default.copyItem(at: url, to: previous)
         }
         try encoder.encode(layout).write(to: url, options: .atomic)
+        Engine.adopt(layout)
     }
 
     private static func migrateLegacy() {
@@ -198,6 +199,10 @@ enum Matcher {
     static func savedIndices(_ layout: Layout?, _ snapshot: Snapshot) -> [Int?] {
         var result = snapshot.stages.map { _ -> Int? in nil }
         guard let layout else { return result }
+        // StageKeeper's own stages know which saved stage they are.
+        if Engine.active {
+            return snapshot.stages.map { live in live.savedID.flatMap { id in layout.stages.firstIndex { $0.id == id } } }
+        }
         let matched = match(layout, snapshot, loose: false)
         let bookmarked = Set(Pins.load().filter { System.sameBoot($0.bootTime) }.map(\.windowID))
         let everywhere = Everywhere.ids()
@@ -216,7 +221,15 @@ enum Matcher {
             }
         }
         var usedSaved = Set<Int>()
-        for p in pairs.sorted(by: { $0.overlap != $1.overlap ? $0.overlap > $1.overlap : $0.share > $1.share }) where result[p.live] == nil && !usedSaved.contains(p.saved) {
+        // On equal overlap and share, the live stage with more windows wins: a window moved
+        // out to a new stage leaves the label with the stage it came from.
+        let sizes = snapshot.stages.map(\.windowIDs.count)
+        let ranked = pairs.sorted {
+            if $0.overlap != $1.overlap { return $0.overlap > $1.overlap }
+            if $0.share != $1.share { return $0.share > $1.share }
+            return sizes[$0.live] > sizes[$1.live]
+        }
+        for p in ranked where result[p.live] == nil && !usedSaved.contains(p.saved) {
             result[p.live] = p.saved
             usedSaved.insert(p.saved)
         }
@@ -257,7 +270,15 @@ enum Actions {
         // Dock app survive until you forget them or give the name to another stage.
         let kept = (previous?.stages ?? []).enumerated()
             .filter { $0.element.label != nil && !indices.contains($0.offset) }
-            .map { var stage = $0.element; stage.current = false; return stage }
+            .map { entry -> SavedStage in
+                var stage = entry.element
+                stage.current = false
+                // With StageKeeper's own stages, a labelled stage with no stage of its own has
+                // no open windows: any of its window IDs now belong to other stages, and would
+                // give it their windows.
+                if Engine.active { stage.windows = stage.windows.map { var w = $0; w.windowID = nil; return w } }
+                return stage
+            }
         let layout = Layout(savedAt: Date(), bootTime: System.bootTime, stages: stages + kept, desktop: desktop)
         try LayoutStore.write(layout, keepPrevious: true)
         Log.write("Saved \(stages.count) stages, \(snapshot.windows.count) windows.")
@@ -427,9 +448,9 @@ enum Actions {
             guard stage.kind != .current, let first = stage.windowIDs.first else { return }
             if carryPins {
                 let pinned = Pins.resolve(snapshot).filter { snapshot.current.contains($0) }
-                if !pinned.isEmpty { try Engine.move(pinned, toStageWith: first) }
+                if !pinned.isEmpty { try Engine.move(pinned, toStageWith: first, snapshot: snapshot) }
             }
-            try Engine.activate(stageWith: first)
+            try Engine.activate(stageWith: first, snapshot: snapshot)
             let names = stage.windowIDs.compactMap { snapshot.windows[$0]?.appName }
             Log.write("Switched to the stage with \(Array(Set(names)).sorted().joined(separator: ", ")).")
             return
@@ -486,8 +507,8 @@ enum Actions {
         if Engine.active {
             let away = Pins.resolve(snapshot).filter { !snapshot.current.contains($0) }
             guard !away.isEmpty else { throw StageError.other("No bookmarked windows are in other stages on this desktop.") }
-            try Engine.move(away, toStageWith: home)
-            Engine.bringForward(home)
+            try Engine.move(away, toStageWith: home, snapshot: snapshot)
+            Engine.bringForward(home, snapshot: snapshot)
             Log.write("Fetched \(away.count) bookmarked windows.")
             return
         }
@@ -562,10 +583,7 @@ enum Actions {
     /// can pick a window that shows on every stage, such as Outlook's reminders.
     static func frontWindow(_ snapshot: Snapshot) -> CGWindowID? {
         let current = Set(snapshot.current)
-        let focused = NSWorkspace.shared.frontmostApplication.flatMap { app -> CGWindowID? in
-            guard let element = AX.value(AX.application(app.processIdentifier), kAXFocusedWindowAttribute) else { return nil }
-            return AX.windowID(element as! AXUIElement)
-        }
+        let focused = AX.focusedWindow()?.1
         let everywhere = Everywhere.ids()
         return focused.flatMap { current.contains($0) && !everywhere.contains($0) ? $0 : nil }
             ?? Snapshot.zOrder().first { current.contains($0) && !everywhere.contains($0) }
@@ -576,6 +594,7 @@ enum Actions {
     /// Blocks for a couple of seconds, so call it off the main thread.
     /// `window` picks a window of the current stage other than the front one.
     static func moveFrontWindow(toStageWith targetWindow: CGWindowID, window chosen: CGWindowID? = nil) throws {
+        Engine.matchFocus()
         let started = Date()
         let snapshot = try Snapshot.take()
         guard let front = chosen.flatMap({ snapshot.current.contains($0) ? $0 : nil }) ?? frontWindow(snapshot),
@@ -589,8 +608,8 @@ enum Actions {
             throw StageError.other("That stage is no longer open.")
         }
         if Engine.active {
-            try Engine.move([front], toStageWith: targetWindow)
-            try Engine.activate(stageWith: targetWindow, focus: front)
+            try Engine.move([front], toStageWith: targetWindow, snapshot: snapshot)
+            try Engine.activate(stageWith: targetWindow, focus: front, snapshot: snapshot)
             Log.write("Moved the \(name) window to another stage.")
             return
         }
@@ -659,8 +678,10 @@ enum Actions {
     }
 
     /// Moves a window of the current stage (the front one when `chosen` is nil) into a new,
-    /// unlabelled stage of its own. Only without Stage Manager, which gives no way to do it.
+    /// unlabelled stage of its own, and switches to it. Only without Stage Manager, which gives
+    /// no way to do it.
     static func moveWindowToNewStage(_ chosen: CGWindowID?) throws {
+        Engine.matchFocus()
         guard Engine.active else { throw StageError.other("A new stage can only be made with Stage Manager turned off.") }
         let snapshot = try Snapshot.take()
         guard let front = chosen.flatMap({ snapshot.current.contains($0) ? $0 : nil }) ?? frontWindow(snapshot),
@@ -670,8 +691,11 @@ enum Actions {
         guard snapshot.current.count > 1 else {
             throw StageError.other("The \(window.appName) window is already the only window in its stage.")
         }
-        try Engine.move([front], toStageWith: nil)
-        Log.write("Moved the \(window.appName) window \"\(window.title)\" to a new stage.")
+        try Engine.move([front], toStageWith: nil, snapshot: snapshot)
+        // Go with the window: the radial menu holds eight stages, so a new unlabelled stage is
+        // often not in it, and the window would seem to vanish.
+        try Engine.activate(stageWith: front, focus: front, snapshot: snapshot)
+        Log.write("Moved the \(window.appName) window \"\(window.title)\" to a new stage and switched to it.")
     }
 
     /// Moves a window of the current stage (the front one when `chosen` is nil) into a labelled
@@ -691,7 +715,7 @@ enum Actions {
         // Stage Manager gives no way to split a window off: the strip hides while a dragged window
         // covers it, and a minimised window rejoins the current stage when restored.
         if Engine.active, snapshot.current.count > 1 {
-            try Engine.move([front], toStageWith: nil)
+            try Engine.move([front], toStageWith: nil, snapshot: snapshot)
         } else if snapshot.current.count > 1 {
             throw StageError.other("Only a window that is alone in its stage can move into \(label): Stage Manager gives StageKeeper no way to split a window off into a new stage. Move this stage's other windows elsewhere first.")
         }
@@ -735,14 +759,50 @@ enum Actions {
 /// the front rather than whichever window Stage Manager lists first. The menu-bar app records
 /// the front window of the current stage every time it reads the stages.
 enum FocusHistory {
-    private static var lastFront: [CGWindowID: Date] = [:]
+    nonisolated(unsafe) private static var lastFront: [CGWindowID: Date] = loadRecent()
+    nonisolated(unsafe) private static var lastNoted: CGWindowID?
     private static let lock = NSLock()
+
+    private struct Recent: Codable { var boot: Date?; var windows: [String: Date] }
+    private static var path: URL { Paths.directory.appendingPathComponent("recent.json") }
+
+    /// Kept on disk so the order of stages by use survives a restart of StageKeeper. Window IDs
+    /// last until the Mac restarts.
+    private static func loadRecent() -> [CGWindowID: Date] {
+        guard let data = try? Data(contentsOf: path), let recent = try? JSONDecoder().decode(Recent.self, from: data),
+              System.sameBoot(recent.boot) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: recent.windows.compactMap { key, date in CGWindowID(key).map { ($0, date) } })
+    }
 
     static func note(_ snapshot: Snapshot) {
         let current = Set(snapshot.current)
         guard let front = Snapshot.zOrder().first(where: current.contains) else { return }
         lock.lock(); defer { lock.unlock() }
         lastFront[front] = Date()
+        guard front != lastNoted else { return }
+        lastNoted = front
+        let recent = Recent(boot: System.bootTime, windows: Dictionary(uniqueKeysWithValues: lastFront.map { (String($0.key), $0.value) }))
+        if let data = try? JSONEncoder().encode(recent) { try? data.write(to: path, options: .atomic) }
+    }
+
+    /// When any of the windows was last in front, for ordering stages by use.
+    static func lastUsed(_ ids: [CGWindowID]) -> Date? {
+        lock.lock(); defer { lock.unlock() }
+        return ids.compactMap { lastFront[$0] }.max()
+    }
+
+    /// Stages ordered most recently used first; stages never seen in front keep their order
+    /// after them.
+    static func byRecentUse<T>(_ items: [T], windows: (T) -> [CGWindowID]) -> [T] {
+        let dated = items.enumerated().map { (offset: $0.offset, item: $0.element, used: lastUsed(windows($0.element))) }
+        return dated.sorted { a, b in
+            switch (a.used, b.used) {
+            case let (x?, y?): return x > y
+            case (_?, nil): return true
+            case (nil, _?): return false
+            default: return a.offset < b.offset
+            }
+        }.map(\.item)
     }
 
     /// The stage's window that was last in front; failing that, the front one by window order.

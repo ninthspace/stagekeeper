@@ -29,8 +29,7 @@ struct SavedStage: Codable {
     var isIdentified: Bool { label != nil || color != nil }
 }
 
-/// The one saved configuration. Stages are stored current first, then strip order (top to
-/// bottom), then overflow. Restore builds them in reverse so the strip ends in the same order.
+/// One desktop's saved stages, current first.
 struct Layout: Codable {
     var version = 1
     var savedAt: Date
@@ -194,8 +193,7 @@ enum Matcher {
 
     /// For each live stage, the index in `layout` of the saved stage it is, if any.
     static func savedIndices(_ layout: Layout?, _ snapshot: Snapshot) -> [Int?] {
-        guard let layout else { return snapshot.stages.map { _ in nil } }
-        return Backend.current.savedIndices(layout, snapshot)
+        snapshot.stages.map { live in live.savedID.flatMap { id in layout?.stages.firstIndex { $0.id == id } } }
     }
 
     static func labels(_ layout: Layout?, _ snapshot: Snapshot) -> [String?] {
@@ -211,10 +209,9 @@ enum Actions {
         let snapshot = try Snapshot.take()
         let previous = LayoutStore.load(desktop)
         let indices = Matcher.savedIndices(previous, snapshot)
-        let everywhere = Everywhere.ids()
         let stages = snapshot.stages.enumerated().compactMap { index, stage -> SavedStage? in
             let old = indices[index].flatMap { previous?.stages[$0] }
-            let ids = stage.windowIDs.filter { !everywhere.contains($0) }
+            let ids = stage.windowIDs
             guard !ids.isEmpty else { return nil }
             return SavedStage(
                 id: old?.id ?? UUID(),
@@ -235,10 +232,9 @@ enum Actions {
             .map { entry -> SavedStage in
                 var stage = entry.element
                 stage.current = false
-                // With StageKeeper's own stages, a labelled stage with no stage of its own has
-                // no open windows: any of its window IDs now belong to other stages, and would
-                // give it their windows.
-                if Backend.current.makesStages { stage.windows = stage.windows.map { var w = $0; w.windowID = nil; return w } }
+                // A labelled stage with no stage of its own has no open windows: any of its
+                // window IDs now belong to other stages, and would give it their windows.
+                stage.windows = stage.windows.map { var w = $0; w.windowID = nil; return w }
                 return stage
             }
         let layout = Layout(savedAt: Date(), bootTime: System.bootTime, stages: stages + kept, desktop: desktop)
@@ -398,37 +394,39 @@ enum Actions {
         throw StageError.other("\(name) is on \(place). Switch to that desktop first.")
     }
 
-    /// Switches to a live stage by focusing one of its windows, which Stage Manager follows.
-    /// Makes `stage` current. See `StageManagerBackend.switchTo` for `carryPins`.
+    /// Makes `stage` current. With `carryPins`, bookmarked windows of the stage being left come along.
     static func switchTo(_ stage: LiveStage, in snapshot: Snapshot, carryPins: Bool = false) throws {
-        try Backend.current.switchTo(stage, in: snapshot, carryPins: carryPins)
+        guard stage.kind != .current, let first = stage.windowIDs.first else { return }
+        if carryPins {
+            let pinned = Pins.resolve(snapshot).filter { snapshot.current.contains($0) }
+            if !pinned.isEmpty { try Engine.move(pinned, toStageWith: first, snapshot: snapshot) }
+        }
+        try Engine.activate(stageWith: first, snapshot: snapshot)
+        let names = stage.windowIDs.compactMap { snapshot.windows[$0]?.appName }
+        Log.write("Switched to the stage with \(Array(Set(names)).sorted().joined(separator: ", ")).")
     }
 
-    /// Brings pinned windows that are in other stages into the current stage: for each stage
-    /// holding pinned windows, switches to it (which brings a pinned window to the front),
-    /// then switches back, carrying the pinned windows as a StageKeeper switch does. Blocks for a
-    /// few seconds, so call it off the main thread.
+    /// Brings bookmarked windows that are in other stages into the current stage.
     static func fetchPinned() throws {
         let snapshot = try Snapshot.take()
         guard let home = frontWindow(snapshot) else { throw StageError.other("There is no current stage to fetch into.") }
-        try Backend.current.fetchPinned(into: home, snapshot: snapshot)
+        let away = Pins.resolve(snapshot).filter { !snapshot.current.contains($0) }
+        guard !away.isEmpty else { throw StageError.other("No bookmarked windows are in other stages on this desktop.") }
+        try Engine.move(away, toStageWith: home, snapshot: snapshot)
+        Engine.bringForward(home, snapshot: snapshot)
+        Log.write("Fetched \(away.count) bookmarked windows.")
     }
 
     /// The window you are working in: the focused window of the frontmost app when it is in the
-    /// current stage, else the current stage's front window by window order. Window order alone
-    /// can pick a window that shows on every stage, such as Outlook's reminders.
+    /// current stage, else the current stage's front window by window order.
     static func frontWindow(_ snapshot: Snapshot) -> CGWindowID? {
         let current = Set(snapshot.current)
-        let focused = AX.focusedWindow()?.1
-        let everywhere = Everywhere.ids()
-        return focused.flatMap { current.contains($0) && !everywhere.contains($0) ? $0 : nil }
-            ?? Snapshot.zOrder().first { current.contains($0) && !everywhere.contains($0) }
+        return AX.focusedWindow().flatMap { current.contains($0.1) ? $0.1 : nil }
+            ?? Snapshot.zOrder().first(where: current.contains)
     }
 
-    /// Moves the front window of the current stage into the stage holding `targetWindow`:
-    /// switches to that stage, then drags the window's preview out of the strip into it.
-    /// Blocks for a couple of seconds, so call it off the main thread.
-    /// `window` picks a window of the current stage other than the front one.
+    /// Moves the front window of the current stage into the stage holding `targetWindow`, and
+    /// switches to that stage. `window` picks a window of the current stage other than the front one.
     static func moveFrontWindow(toStageWith targetWindow: CGWindowID, window chosen: CGWindowID? = nil) throws {
         Engine.matchFocus()
         let snapshot = try Snapshot.take()
@@ -440,15 +438,16 @@ enum Actions {
         guard let target = snapshot.stages.first(where: { $0.windowIDs.contains(targetWindow) }), target.kind != .current else {
             throw StageError.other("That stage is no longer open.")
         }
-        try Backend.current.move(front, toStageWith: targetWindow, target: target, snapshot: snapshot)
+        _ = target
+        try Engine.move([front], toStageWith: targetWindow, snapshot: snapshot)
+        try Engine.activate(stageWith: targetWindow, focus: front, snapshot: snapshot)
+        Log.write("Moved the \(name) window to another stage.")
     }
 
     /// Moves a window of the current stage (the front one when `chosen` is nil) into a new,
-    /// unlabelled stage of its own, and switches to it. Only without Stage Manager, which gives
-    /// no way to do it.
+    /// unlabelled stage of its own, and switches to it.
     static func moveWindowToNewStage(_ chosen: CGWindowID?) throws {
         Engine.matchFocus()
-        guard Backend.current.makesStages else { throw StageError.other("A new stage can only be made with Stage Manager turned off.") }
         let snapshot = try Snapshot.take()
         guard let front = chosen.flatMap({ snapshot.current.contains($0) ? $0 : nil }) ?? frontWindow(snapshot),
               let window = snapshot.windows[front] else {
@@ -465,9 +464,8 @@ enum Actions {
     }
 
     /// Moves a window of the current stage (the front one when `chosen` is nil) into a labelled
-    /// stage that has no open windows. Stage Manager has no empty stages, so this works only for a
-    /// window alone in its stage: the saved stage is pointed at it so its label, colour and
-    /// shortcut follow.
+    /// stage that has no open windows: the window becomes a stage of its own, and the saved stage
+    /// is pointed at it so its label, colour and shortcut follow.
     static func moveWindow(_ chosen: CGWindowID?, toEmptyStage id: UUID) throws {
         guard let found = locate(id), found.layout.desktop == nil || found.layout.desktop == Desktops.current().key else {
             throw StageError.other("That stage is not on this desktop.")
@@ -478,13 +476,7 @@ enum Actions {
             throw StageError.other("The current stage has no window to move.")
         }
         let label = found.layout.stages[found.index].label ?? "that stage"
-        // Stage Manager gives no way to split a window off: the strip hides while a dragged window
-        // covers it, and a minimised window rejoins the current stage when restored.
-        if Backend.current.makesStages, snapshot.current.count > 1 {
-            try Engine.move([front], toStageWith: nil, snapshot: snapshot)
-        } else if snapshot.current.count > 1 {
-            throw StageError.other("Only a window that is alone in its stage can move into \(label): Stage Manager gives StageKeeper no way to split a window off into a new stage. Move this stage's other windows elsewhere first.")
-        }
+        if snapshot.current.count > 1 { try Engine.move([front], toStageWith: nil, snapshot: snapshot) }
         var layout = found.layout
         let saved = SavedWindow(bundleID: window.bundleID, appName: window.appName, title: window.title,
                                 frame: SavedRect(window.frame), windowID: window.id)
@@ -522,7 +514,7 @@ enum Actions {
 }
 
 /// Remembers which window was in front of each stage, so a switch brings that window back to
-/// the front rather than whichever window Stage Manager lists first. The menu-bar app records
+/// the front rather than whichever window is listed first. The menu-bar app records
 /// the front window of the current stage every time it reads the stages.
 enum FocusHistory {
     nonisolated(unsafe) private static var lastFront: [CGWindowID: Date] = loadRecent()

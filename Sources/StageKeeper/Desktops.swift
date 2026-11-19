@@ -1,9 +1,7 @@
 import AppKit
 
 /// The desktops (Spaces) macOS manages, read through private SkyLight calls that have been
-/// stable for many releases. Stage Manager keeps separate stages on each desktop, and
-/// StageKeeper can only see the stages of the desktop that is showing, so it keeps one
-/// layout per desktop.
+/// stable for many releases. Each desktop has its own stages and its own saved layout.
 ///
 /// A desktop is identified by the UUID macOS stores for it, which stays the same across
 /// restarts. The first desktop on the main display has an empty UUID; it is called "main".

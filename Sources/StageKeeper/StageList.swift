@@ -18,7 +18,7 @@ struct StageList {
         /// The saved label, else the apps' names.
         let title: String
         let apps: [String]
-        /// In stage order, without windows that show on every stage.
+        /// In stage order.
         let windows: [Window]
     }
 
@@ -34,13 +34,12 @@ struct StageList {
         let snapshot = try Snapshot.take()
         let layout = LayoutStore.load()
         let indices = Matcher.savedIndices(layout, snapshot)
-        let hidden = Engine.active ? Engine.hiddenFrames() : [:]
-        let everywhere = Everywhere.ids()
+        let hidden = Engine.hiddenFrames()
         var icons: [pid_t: NSImage] = [:]
         var entries: [Entry] = []
         for (index, live) in snapshot.stages.enumerated() {
             let saved = indices[index].flatMap { layout?.stages[$0] }
-            let windows = live.windowIDs.filter { !everywhere.contains($0) }.compactMap { id -> Window? in
+            let windows = live.windowIDs.compactMap { id -> Window? in
                 guard let window = snapshot.windows[id] else { return nil }
                 if icons[window.pid] == nil { icons[window.pid] = NSRunningApplication(processIdentifier: window.pid)?.icon }
                 return Window(id: id, app: window.appName, title: window.title, icon: icons[window.pid], frame: hidden[id] ?? window.frame)

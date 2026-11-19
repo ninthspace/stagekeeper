@@ -225,8 +225,6 @@ struct RadialModel {
     /// stage, the other stages by recent use, then the labelled stages with no open windows.
     var moreTargets: [Stage] = []
     static let arcSize = 8, maxArcs = 3
-    /// Whether Move offers a new stage: only StageKeeper's own stages can make one.
-    var canMakeStages = Backend.current.makesStages
     var others: [Stage] = []
     /// The window the menu acts on: the current stage's window under the pointer when the menu
     /// opened, else the front window.
@@ -260,8 +258,8 @@ struct RadialModel {
             model.empty.append(Stage(title: saved.label!, label: saved.label, number: numbers[saved.id!], shortcut: shortcuts[saved.id!]?.display, colour: saved.color,
                                      isCurrent: false, initial: "", place: nil, target: .empty(saved.id!)))
         }
-        let newStage = model.canMakeStages ? [Stage(title: "New stage", label: nil, number: nil, colour: nil, isCurrent: false, initial: "",
-                                                    place: nil, target: .newStage)] : []
+        let newStage = [Stage(title: "New stage", label: nil, number: nil, colour: nil, isCurrent: false, initial: "",
+                              place: nil, target: .newStage)]
         model.moreTargets = Array((newStage + byUse.filter { !$0.isCurrent } + model.empty).prefix(Self.arcSize * Self.maxArcs))
 
         let desktops = Desktops.all()
@@ -282,7 +280,7 @@ struct RadialModel {
 
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
         let topLeft = CGPoint(x: point.x, y: primaryHeight - point.y)
-        let currentWindows = Set(snapshot.current).subtracting(Everywhere.ids())
+        let currentWindows = Set(snapshot.current)
         let underPointer = Snapshot.zOrder().first { id in
             currentWindows.contains(id) && (snapshot.windows[id]?.frame.contains(topLeft) ?? false)
         }
@@ -1135,8 +1133,7 @@ extension Actions {
     }
 
     /// Puts a window of the current stage (the front one when `chosen` is nil) in a part of its screen. `part` is a fraction of the screen's usable
-    /// area (without the menu bar and Dock), measured from its top-left corner. A window over the
-    /// strip's area makes Stage Manager slide the strip away until the pointer reaches the edge.
+    /// area (without the menu bar and Dock), measured from its top-left corner.
     static func tile(_ chosen: CGWindowID?, _ part: CGRect) throws {
         let snapshot = try Snapshot.take()
         guard let front = chosen ?? frontWindow(snapshot), let window = snapshot.windows[front], let frame = AX.frame(window.element) else {

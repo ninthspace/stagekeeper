@@ -1,7 +1,7 @@
 import AppKit
 
 let usage = """
-StageKeeper — save and restore Stage Manager stages.
+StageKeeper — window stages for macOS, with Stage Manager off.
 
 Usage:
   stagekeeper save              Save every stage on this desktop (labels are kept).
@@ -11,8 +11,8 @@ Usage:
   stagekeeper colour <colour>   Colour the current stage: a name (\(Palette.colours.map(\.name).joined(separator: ", "))),
                                 #RRGGBB, or none.
   stagekeeper switch <label|n>  Switch to a labelled stage by label or shortcut number (asks the menu-bar app).
-  stagekeeper agent             Run the menu-bar item; restores once per boot.
-  stagekeeper reveal            Put back every window StageKeeper hid (Stage Manager off).
+  stagekeeper agent             Run the menu-bar item.
+  stagekeeper reveal            Put back every window StageKeeper hid.
 
 Layouts:     \(Paths.desktops.path) (one file per desktop)
 Log:         \(Paths.log.path)
@@ -73,12 +73,6 @@ case "agent":
     app.delegate = controller
     app.setActivationPolicy(.accessory)
     app.run()
-case "skip-restore":
-    // Used by install.sh so the first agent launch does not rearrange the current session.
-    var state = AgentState.load()
-    state.lastRestoredBoot = System.bootTime
-    state.restoredDesktops = Desktops.all().map(\.key)
-    state.write()
 case "help", "-h", "--help":
     print(usage)
 default:

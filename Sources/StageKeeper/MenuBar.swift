@@ -1,17 +1,10 @@
 import AppKit
 
 struct AgentState: Codable {
-    /// The boot `restoredDesktops` belongs to.
-    var lastRestoredBoot: Date?
-    /// Desktops whose layout has been restored (or deliberately skipped) during that boot.
-    var restoredDesktops: [String]?
     /// Windows that come along when StageKeeper switches stage.
     var pins: [Pin]?
     /// The user's own wallpaper per screen, put back on stages without a colour.
     var originalWallpapers: [String: String]?
-    /// Windows that show on every stage (see `Everywhere`), and the boot their IDs belong to.
-    var everywhere: [UInt32]?
-    var everywhereBoot: Date?
 
     static func load() -> AgentState {
         guard let data = try? Data(contentsOf: Paths.state) else { return AgentState() }
@@ -103,8 +96,9 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         started = true
         revealOnSignals()
         if Engine.active {
-            Log.write("Stage Manager is off; StageKeeper keeps the stages itself.")
             DispatchQueue.global(qos: .userInitiated).async { Engine.reconcile(force: true) }
+        } else {
+            Log.write("Stage Manager is on, so StageKeeper is paused until it is turned off.")
         }
         // Picking a window from an app's Dock menu or Window menu changes the focused window
         // without activating an app, so no notification comes: check the focused window often.
@@ -114,14 +108,6 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startRadialMenu()
         DockApps.sync()
         refreshTitle()
-        var state = AgentState.load()
-        if !System.sameBoot(state.lastRestoredBoot) {
-            state.lastRestoredBoot = System.bootTime
-            state.restoredDesktops = []
-            state.write()
-        }
-        // Give login items time to open their windows before rearranging.
-        restoreDesktopOnce(after: 10)
     }
 
     /// Opens the radial menu on a four-finger trackpad click or tap.
@@ -166,25 +152,6 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func desktopChanged() {
         if !Engine.active, Engine.hasHidden { DispatchQueue.global(qos: .userInitiated).async { Engine.revealAll() } }
         appActivated()
-        guard started else { return }
-        restoreDesktopOnce(after: 1.5)
-    }
-
-    /// Restores the showing desktop's layout the first time it is shown in each boot. Stage
-    /// Manager only exposes the stages of the desktop that is showing, so each desktop is
-    /// restored when you first go to it.
-    private func restoreDesktopOnce(after delay: Double) {
-        // StageKeeper's own stages are kept as they are; nothing to restore.
-        guard !Engine.active else { return }
-        let desktop = Desktops.current().key
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, Desktops.current().key == desktop, LayoutStore.load(desktop) != nil else { return }
-            var state = AgentState.load()
-            guard System.sameBoot(state.lastRestoredBoot), !(state.restoredDesktops ?? []).contains(desktop) else { return }
-            state.restoredDesktops = (state.restoredDesktops ?? []) + [desktop]
-            state.write()
-            self.restore()
-        }
     }
 
     private var ticks = 0
@@ -215,8 +182,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private static let symbol = NSImage(systemSymbolName: "rectangle.stack", accessibilityDescription: "StageKeeper")
 
-    /// A stage switch activates an app before Stage Manager finishes moving the windows,
-    /// so read the stages again once the animation is over.
+    /// Reads the stages again shortly after an app comes forward, once its windows have moved.
     @objc private func appActivated() {
         engineTick()
         refreshTitle()
@@ -227,8 +193,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Updates the menu-bar title, the wallpaper and the registered shortcuts.
     @objc private func refreshTitle() {
         guard !busy, let button = item.button else { return }
-        // Turning Stage Manager back on leaves StageKeeper's hidden windows off screen.
-        if !Engine.active, Engine.hasHidden { Engine.revealAll() }
+        // StageKeeper pauses while Stage Manager is on, and puts its hidden windows back.
+        if !Engine.active {
+            if Engine.hasHidden { Engine.revealAll() }
+            button.title = " Stage Manager is on"
+            button.image = Self.symbol
+            return
+        }
         let layout = LayoutStore.load()
         Hotkeys.register(Shortcuts.wanted(fetchActive: !Pins.load().isEmpty))
         guard let snapshot = try? Snapshot.take() else {
@@ -237,7 +208,6 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         FocusHistory.note(snapshot)
-        Everywhere.note(snapshot)
         let indices = Matcher.savedIndices(layout, snapshot)
         let currentIndex = snapshot.stages.firstIndex { $0.kind == .current }
         let saved = currentIndex.flatMap { indices[$0] }.flatMap { layout?.stages[$0] }
@@ -318,7 +288,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let colour = stage.color { move.image = Palette.dot(colour) }
             moveMenu.addItem(move)
         }
-        // Labelled stages on other desktops, which Stage Manager does not show from here.
+        // Labelled stages on other desktops.
         for other in LayoutStore.loadAll() where other.desktop != desktop.key {
             let stages = other.stages.filter { $0.label != nil && $0.id != nil }
             guard !stages.isEmpty else { continue }
@@ -468,7 +438,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         perform { try Actions.switchTo(id: id) }
     }
 
-    /// Runs a switch off the main thread (strip clicks sleep between mouse events), then
+    /// Runs a switch off the main thread (window moves wait on apps), then
     /// refreshes the title and reports any error.
     private func perform(_ body: @escaping () throws -> Void) {
         guard !busy else { return }
@@ -499,10 +469,6 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func restore() {
         guard !busy else { return }
-        guard !Engine.active else {
-            Log.write("Restore skipped: it rebuilds Stage Manager's stages, and Stage Manager is off.")
-            return
-        }
         busy = true
         item.button?.title = " Restoring…"
         DispatchQueue.global(qos: .userInitiated).async {

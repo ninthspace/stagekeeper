@@ -52,7 +52,6 @@ cat > "$AGENT" <<PLIST
 </plist>
 PLIST
 
-"$APP/Contents/MacOS/stagekeeper" skip-restore
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$AGENT"
 

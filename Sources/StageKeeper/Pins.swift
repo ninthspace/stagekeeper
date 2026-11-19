@@ -1,11 +1,8 @@
 import AppKit
 
 /// A bookmarked window (called a pin in the code): Fetch Bookmarked Windows (⌃⌥0) brings it
-/// into the current stage from whichever stage holds it. Stage Manager has no such setting, so
-/// StageKeeper switches to the window's stage, which brings it to the front, switches back, and
-/// drags its preview out of the strip. Ordinary switches leave bookmarked windows where they are:
-/// a drag can take a whole stage instead of one window, and doing that on every switch merged
-/// stages.
+/// into the current stage from whichever stage holds it. Ordinary switches leave bookmarked
+/// windows where they are.
 struct Pin: Codable, Equatable {
     var bundleID: String
     var appName: String

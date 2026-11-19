@@ -1,6 +1,6 @@
 import AppKit
 
-/// StageKeeper's own stages, used instead of Stage Manager when Stage Manager is off.
+/// StageKeeper's stages. StageKeeper pauses while Stage Manager is on.
 ///
 /// A stage is a list of windows. Every window belongs to exactly one stage on its desktop; a
 /// window StageKeeper has not seen before joins the current stage. Switching moves the current
@@ -154,8 +154,7 @@ enum Engine {
         return load().desktops[Desktops.current().key]
     }
 
-    /// The first state for a desktop: the stages of the last save, so the stages Stage Manager
-    /// had carry over. Window IDs are used only within the boot they were saved in, since macOS
+    /// The first state for a desktop: the stages of the last save. Window IDs are used only within the boot they were saved in, since macOS
     /// reuses them; otherwise windows are matched by app and title.
     private static func seed(_ windows: [CGWindowID: LiveWindow]?, order: [CGWindowID]) -> DesktopState {
         var desktop = DesktopState()
@@ -164,7 +163,7 @@ enum Engine {
         if System.sameBoot(layout.bootTime) {
             groups = layout.stages.map { $0.windows.compactMap(\.windowID) }
         } else if let windows {
-            let snapshot = Snapshot(windows: windows, order: order, strip: [], current: order, stages: [])
+            let snapshot = Snapshot(windows: windows, order: order, current: order, stages: [])
             groups = Matcher.match(layout, snapshot, loose: false).map { $0.compactMap { $0 } }
         } else {
             groups = []
@@ -175,6 +174,46 @@ enum Engine {
         }
         Log.write("Started StageKeeper's own stages from the last save: \(desktop.stages.count) stages.")
         return desktop
+    }
+
+    /// Replaces this desktop's stages with the saved ones in `layout`, using `matched` (each saved
+    /// stage's windows matched to live ones). Windows not in the save stay together as they were.
+    /// The saved stage that was current becomes current, and windows go back to their saved
+    /// frames: shown ones now, hidden ones when their stage next shows.
+    static func rebuild(_ layout: Layout, matched: [[CGWindowID?]], snapshot: Snapshot) {
+        var frames: [CGWindowID: CGRect] = [:]
+        edit(seedingFrom: snapshot.windows, order: snapshot.order) { desktop in
+            let placed = Set(matched.joined().compactMap { $0 })
+            var stages: [Stage] = []
+            var current: Int?
+            for (s, saved) in layout.stages.enumerated() where s < matched.count {
+                let ids = matched[s].compactMap { $0 }
+                guard !ids.isEmpty else { continue }
+                if saved.current { current = stages.count }
+                stages.append(Stage(windows: ids, savedID: saved.isIdentified ? saved.id : nil))
+                for (w, id) in matched[s].enumerated() where w < saved.windows.count {
+                    if let id { frames[id] = saved.windows[w].frame.cgRect }
+                }
+            }
+            let claimed = Set(stages.compactMap(\.savedID))
+            for old in desktop.stages {
+                let rest = old.windows.filter { !placed.contains($0) }
+                guard !rest.isEmpty else { continue }
+                stages.append(Stage(windows: rest, savedID: old.savedID.flatMap { claimed.contains($0) ? nil : $0 }))
+            }
+            desktop.stages = stages
+            desktop.current = min(current ?? 0, max(stages.count - 1, 0))
+        }
+        reconcile(force: true)
+        var shown: Set<CGWindowID> = []
+        edit { desktop in
+            if desktop.stages.indices.contains(desktop.current) { shown = Set(desktop.stages[desktop.current].windows) }
+            for (id, frame) in frames where desktop.isHidden(id) { desktop.hidden[String(id)] = SavedRect(frame) }
+        }
+        for (id, frame) in frames where shown.contains(id) {
+            if let window = snapshot.windows[id] { AX.setFrame(window.element, frame) }
+        }
+        Log.write("Rebuilt this desktop's stages from the save.")
     }
 
     // MARK: Reading
@@ -478,7 +517,7 @@ enum Engine {
     }
 
     /// Puts every hidden window StageKeeper can reach back where it was. Called when StageKeeper
-    /// quits and when Stage Manager is turned back on. Accessibility lists only the windows of
+    /// quits and when Stage Manager is turned on. Accessibility lists only the windows of
     /// the desktops showing, so windows hidden on another desktop keep their record and are put
     /// back when that desktop shows.
     static func revealAll() {

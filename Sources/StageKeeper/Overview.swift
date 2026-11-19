@@ -60,32 +60,16 @@ final class Overview {
 
     /// The stages, most recently used first, as in the radial menu.
     private static func read() throws -> ([Stage], Snapshot) {
-        let snapshot = try Snapshot.take()
-        let layout = LayoutStore.load()
-        let indices = Matcher.savedIndices(layout, snapshot)
+        let list = try StageList.read()
         let shortcuts = Shortcuts.stages()
-        let hidden = Engine.active ? Engine.hiddenFrames() : [:]
-        let everywhere = Everywhere.ids()
         let rank = Dictionary(Snapshot.zOrder().enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
-        var icons: [pid_t: NSImage] = [:]
-        var stages: [Stage] = []
-        for (index, live) in snapshot.stages.enumerated() {
-            let saved = indices[index].flatMap { layout?.stages[$0] }
-            let ids = live.windowIDs.filter { !everywhere.contains($0) }
-                .sorted { (rank[$0] ?? .max) > (rank[$1] ?? .max) }
-            let windows = ids.compactMap { id -> Window? in
-                guard let window = snapshot.windows[id] else { return nil }
-                if icons[window.pid] == nil { icons[window.pid] = NSRunningApplication(processIdentifier: window.pid)?.icon }
-                return Window(frame: hidden[id] ?? window.frame, title: window.title, app: window.appName, icon: icons[window.pid])
-            }
-            guard !windows.isEmpty else { continue }
-            let apps = windows.reversed().map(\.app).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
-            let stage = Stage(title: saved?.label ?? apps.joined(separator: ", "), colour: saved?.color,
-                              shortcut: saved?.id.flatMap { shortcuts[$0]?.display }, isCurrent: live.kind == .current,
-                              windows: windows, live: live)
-            stages.append(stage)
+        let stages = list.entries.map { entry in
+            let windows = entry.windows.sorted { (rank[$0.id] ?? .max) > (rank[$1.id] ?? .max) }
+                .map { Window(frame: $0.frame, title: $0.title, app: $0.app, icon: $0.icon) }
+            return Stage(title: entry.title, colour: entry.saved?.color, shortcut: entry.saved?.id.flatMap { shortcuts[$0]?.display },
+                         isCurrent: entry.live.kind == .current, windows: windows, live: entry.live)
         }
-        return (FocusHistory.byRecentUse(stages) { $0.live.windowIDs }, snapshot)
+        return (stages, list.snapshot)
     }
 }
 

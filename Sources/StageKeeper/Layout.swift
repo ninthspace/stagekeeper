@@ -192,48 +192,10 @@ enum Matcher {
         return result
     }
 
-    /// For each live stage, the index of the named or coloured saved stage it overlaps most
-    /// (each saved stage used once). Bookmarked windows count for little: they move between
-    /// stages, so a stage you fetch one into would otherwise take the name of the stage it came
-    /// from. They still count, so a stage made mostly of bookmarked windows keeps its name.
+    /// For each live stage, the index in `layout` of the saved stage it is, if any.
     static func savedIndices(_ layout: Layout?, _ snapshot: Snapshot) -> [Int?] {
-        var result = snapshot.stages.map { _ -> Int? in nil }
-        guard let layout else { return result }
-        // StageKeeper's own stages know which saved stage they are.
-        if Engine.active {
-            return snapshot.stages.map { live in live.savedID.flatMap { id in layout.stages.firstIndex { $0.id == id } } }
-        }
-        let matched = match(layout, snapshot, loose: false)
-        let bookmarked = Set(Pins.load().filter { System.sameBoot($0.bootTime) }.map(\.windowID))
-        let everywhere = Everywhere.ids()
-        var pairs: [(overlap: Int, share: Double, live: Int, saved: Int)] = []
-        for (l, live) in snapshot.stages.enumerated() {
-            let liveSet = Set(live.windowIDs)
-            for (s, saved) in layout.stages.enumerated() where saved.isIdentified {
-                let shared = matched[s].compactMap { $0 }.filter { liveSet.contains($0) && !everywhere.contains($0) }
-                let overlap = shared.filter { !bookmarked.contains($0) }.count * 100 + shared.filter(bookmarked.contains).count
-                // On equal overlap, the saved stage with more of its windows here wins. A window
-                // that shows on every stage, such as an Outlook reminder, otherwise ties a stage
-                // with the one it was saved in.
-                let counted = matched[s].enumerated().filter { _, id in id.map { !everywhere.contains($0) } ?? true }.count
-                let share = Double(shared.count) / Double(max(counted, 1))
-                if overlap > 0 { pairs.append((overlap, share, l, s)) }
-            }
-        }
-        var usedSaved = Set<Int>()
-        // On equal overlap and share, the live stage with more windows wins: a window moved
-        // out to a new stage leaves the label with the stage it came from.
-        let sizes = snapshot.stages.map(\.windowIDs.count)
-        let ranked = pairs.sorted {
-            if $0.overlap != $1.overlap { return $0.overlap > $1.overlap }
-            if $0.share != $1.share { return $0.share > $1.share }
-            return sizes[$0.live] > sizes[$1.live]
-        }
-        for p in ranked where result[p.live] == nil && !usedSaved.contains(p.saved) {
-            result[p.live] = p.saved
-            usedSaved.insert(p.saved)
-        }
-        return result
+        guard let layout else { return snapshot.stages.map { _ in nil } }
+        return Backend.current.savedIndices(layout, snapshot)
     }
 
     static func labels(_ layout: Layout?, _ snapshot: Snapshot) -> [String?] {
@@ -276,7 +238,7 @@ enum Actions {
                 // With StageKeeper's own stages, a labelled stage with no stage of its own has
                 // no open windows: any of its window IDs now belong to other stages, and would
                 // give it their windows.
-                if Engine.active { stage.windows = stage.windows.map { var w = $0; w.windowID = nil; return w } }
+                if Backend.current.makesStages { stage.windows = stage.windows.map { var w = $0; w.windowID = nil; return w } }
                 return stage
             }
         let layout = Layout(savedAt: Date(), bootTime: System.bootTime, stages: stages + kept, desktop: desktop)
@@ -437,64 +399,9 @@ enum Actions {
     }
 
     /// Switches to a live stage by focusing one of its windows, which Stage Manager follows.
-    /// Checks that the stage became current; the last attempt clicks the strip thumbnail instead,
-    /// which is less reliable because Stage Manager often reports the hidden strip off screen.
-    ///
-    /// With `carryPins`, pinned windows in the stage being left come along (see `Pins`). Only
-    /// Fetch Pinned Windows (⌃⌥0) does that: an ordinary switch leaves pinned windows where they
-    /// are, because a drag that takes a whole stage instead of one window merges two stages.
+    /// Makes `stage` current. See `StageManagerBackend.switchTo` for `carryPins`.
     static func switchTo(_ stage: LiveStage, in snapshot: Snapshot, carryPins: Bool = false) throws {
-        if Engine.active {
-            guard stage.kind != .current, let first = stage.windowIDs.first else { return }
-            if carryPins {
-                let pinned = Pins.resolve(snapshot).filter { snapshot.current.contains($0) }
-                if !pinned.isEmpty { try Engine.move(pinned, toStageWith: first, snapshot: snapshot) }
-            }
-            try Engine.activate(stageWith: first, snapshot: snapshot)
-            let names = stage.windowIDs.compactMap { snapshot.windows[$0]?.appName }
-            Log.write("Switched to the stage with \(Array(Set(names)).sorted().joined(separator: ", ")).")
-            return
-        }
-        guard stage.kind != .current, let id = FocusHistory.frontmost(of: stage.windowIDs) else { return }
-        let pinned = carryPins ? Pins.resolve(snapshot).filter { snapshot.current.contains($0) } : []
-        var frames: [CGWindowID: CGRect] = [:]
-        if !pinned.isEmpty {
-            // Bring the pinned windows to the front, first pin frontmost, so their previews are
-            // on top of the thumbnail this stage becomes.
-            for pin in pinned {
-                if let window = snapshot.windows[pin], let frame = AX.frame(window.element) { frames[pin] = frame }
-            }
-            for pin in pinned.reversed() {
-                if let window = snapshot.windows[pin] { AX.focus(window); usleep(120_000) }
-            }
-        }
-        var snapshot = snapshot
-        var switched = false
-        for attempt in 1...3 where !switched {
-            if attempt < 3, let window = snapshot.windows[id] {
-                AX.focus(window)
-            } else if let strip = snapshot.stripItem(containing: id) {
-                StripClick.click(strip, shift: false)
-            }
-            // Poll rather than wait a fixed time: most switches finish well inside the limit.
-            var after: Snapshot?
-            for _ in 0..<8 {
-                usleep(80_000)
-                after = try? Snapshot.take()
-                if after?.current.contains(id) == true { switched = true; break }
-            }
-            guard let after else { return }
-            if !switched {
-                Log.write("Stage switch attempt \(attempt) did not take.")
-                snapshot = after
-            }
-        }
-        if switched, !carryPins {
-            let names = stage.windowIDs.compactMap { snapshot.windows[$0]?.appName }
-            Log.write("Switched to the stage with \(Array(Set(names)).sorted().joined(separator: ", ")).")
-        }
-        guard switched, carryPins else { return }
-        if !pinned.isEmpty { carry(pinned, frames: frames, thenFocus: id) }
+        try Backend.current.switchTo(stage, in: snapshot, carryPins: carryPins)
     }
 
     /// Brings pinned windows that are in other stages into the current stage: for each stage
@@ -502,80 +409,9 @@ enum Actions {
     /// then switches back, carrying the pinned windows as a StageKeeper switch does. Blocks for a
     /// few seconds, so call it off the main thread.
     static func fetchPinned() throws {
-        var snapshot = try Snapshot.take()
+        let snapshot = try Snapshot.take()
         guard let home = frontWindow(snapshot) else { throw StageError.other("There is no current stage to fetch into.") }
-        if Engine.active {
-            let away = Pins.resolve(snapshot).filter { !snapshot.current.contains($0) }
-            guard !away.isEmpty else { throw StageError.other("No bookmarked windows are in other stages on this desktop.") }
-            try Engine.move(away, toStageWith: home, snapshot: snapshot)
-            Engine.bringForward(home, snapshot: snapshot)
-            Log.write("Fetched \(away.count) bookmarked windows.")
-            return
-        }
-        let away = Pins.resolve(snapshot).filter { !snapshot.current.contains($0) && snapshot.stripItem(containing: $0) != nil }
-        guard !away.isEmpty else { throw StageError.other("No bookmarked windows are in other stages on this desktop.") }
-        let groups = stageGroups(snapshot, leaving: Set(Pins.resolve(snapshot)))
-        var done = Set<CGWindowID>()
-        for pin in away where !done.contains(pin) {
-            guard let window = snapshot.windows[pin] else { continue }
-            AX.focus(window)
-            var there = false
-            for _ in 0..<15 {
-                usleep(100_000)
-                snapshot = try Snapshot.take()
-                if snapshot.current.contains(pin) && !snapshot.current.contains(home) { there = true; break }
-            }
-            guard there, let back = snapshot.stages.first(where: { $0.windowIDs.contains(home) }) else {
-                throw StageError.other("Could not go to the \(window.appName) window's stage.")
-            }
-            done.formUnion(snapshot.current)
-            try switchTo(back, in: snapshot, carryPins: true)
-            snapshot = try Snapshot.take()
-        }
-        try checkForMerges(groups, after: "fetching bookmarked windows")
-        snapshot = try Snapshot.take()
-        let missing = Pins.resolve(snapshot).filter { away.contains($0) && !snapshot.current.contains($0) }
-        if !missing.isEmpty { throw StageError.other("Some bookmarked windows did not come. See the log.") }
-    }
-
-    /// Drags pinned windows from the stage just left into the current one, puts each back at its
-    /// position and size, and returns focus to `focus`.
-    private static func carry(_ pinned: [CGWindowID], frames: [CGWindowID: CGRect], thenFocus focus: CGWindowID) {
-        // While Stage Manager animates the switch, the windows left behind still read as current.
-        guard var after = try? Snapshot.take() else { return }
-        for _ in 0..<18 where pinned.contains(where: after.current.contains) {
-            usleep(100_000)
-            guard let next = try? Snapshot.take() else { return }
-            after = next
-        }
-        for pin in pinned {
-            guard let window = after.windows[pin] else {
-                Log.write("A bookmarked window was not found after the switch.")
-                continue
-            }
-            if after.current.contains(pin) { continue }
-            guard after.stripItem(containing: pin) != nil else {
-                Log.write("The bookmarked \(window.appName) window is not in the strip, so it cannot be dragged.")
-                continue
-            }
-            guard StripClick.dragIntoCurrent(window) else {
-                Log.write("The bookmarked \(window.appName) window stayed behind: its preview was not found.")
-                continue
-            }
-            var arrived = false
-            for _ in 0..<10 {
-                usleep(100_000)
-                guard let next = try? Snapshot.take() else { break }
-                after = next
-                if next.current.contains(pin) { arrived = true; break }
-            }
-            if arrived, let frame = frames[pin], let element = after.windows[pin]?.element {
-                AX.setFrame(element, frame)
-            } else if !arrived {
-                Log.write("The bookmarked \(window.appName) window stayed behind.")
-            }
-        }
-        if let window = (try? Snapshot.take())?.windows[focus] { AX.focus(window) }
+        try Backend.current.fetchPinned(into: home, snapshot: snapshot)
     }
 
     /// The window you are working in: the focused window of the frontmost app when it is in the
@@ -595,86 +431,16 @@ enum Actions {
     /// `window` picks a window of the current stage other than the front one.
     static func moveFrontWindow(toStageWith targetWindow: CGWindowID, window chosen: CGWindowID? = nil) throws {
         Engine.matchFocus()
-        let started = Date()
         let snapshot = try Snapshot.take()
         guard let front = chosen.flatMap({ snapshot.current.contains($0) ? $0 : nil }) ?? frontWindow(snapshot),
               let name = snapshot.windows[front]?.appName else {
             throw StageError.other("The current stage has no window to move.")
         }
         Log.write("Moving the \(name) window \"\(snapshot.windows[front]?.title ?? "")\".")
-        // A dropped preview lands where it is dropped; the window goes back here afterwards.
-        let originalFrame = snapshot.windows[front].flatMap { AX.frame($0.element) }
         guard let target = snapshot.stages.first(where: { $0.windowIDs.contains(targetWindow) }), target.kind != .current else {
             throw StageError.other("That stage is no longer open.")
         }
-        if Engine.active {
-            try Engine.move([front], toStageWith: targetWindow, snapshot: snapshot)
-            try Engine.activate(stageWith: targetWindow, focus: front, snapshot: snapshot)
-            Log.write("Moved the \(name) window to another stage.")
-            return
-        }
-        try switchTo(target, in: snapshot)
-        // While Stage Manager animates the switch, the old stage's windows are still on screen
-        // and read as current. Wait for the window to reach the strip.
-        var after = try Snapshot.take()
-        for _ in 0..<18 where after.current.contains(front) {
-            usleep(100_000)
-            after = try Snapshot.take()
-        }
-        guard after.current.contains(targetWindow) else { throw StageError.other("Could not switch to that stage.") }
-        if after.current.contains(front) {
-            throw StageError.other("The \(name) window shows on every stage, or is already in that stage, so there is nothing to move.")
-        }
-        guard let window = after.windows[front], after.stripItem(containing: front) != nil else {
-            throw StageError.other("The \(name) window is not in the strip, so it cannot be dragged.")
-        }
-        let groups = stageGroups(snapshot, leaving: [front])
-        guard StripClick.dragIntoCurrent(window) else {
-            throw StageError.other("Could not find the \(name) window in the strip. See the log for details.")
-        }
-        for _ in 0..<10 {
-            usleep(100_000)
-            after = try Snapshot.take()
-            if after.current.contains(front) { break }
-        }
-        guard after.current.contains(front) else { throw StageError.other("Stage Manager did not take the \(name) window.") }
-        if let originalFrame, let element = after.windows[front]?.element { AX.setFrame(element, originalFrame) }
-        try checkForMerges(groups, after: "moving the \(name) window")
-        Log.write("Moved the \(name) window to another stage in \(String(format: "%.1f", Date().timeIntervalSince(started))) s.")
-    }
-
-    /// The windows of each stage in the strip and the current stage, leaving out `leaving` (the
-    /// windows that are meant to move).
-    private static func stageGroups(_ snapshot: Snapshot, leaving: Set<CGWindowID>) -> [Set<CGWindowID>] {
-        snapshot.stages.filter { $0.kind != .overflow }
-            .map { Set($0.windowIDs).subtracting(leaving) }
-            .filter { !$0.isEmpty }
-    }
-
-    /// Throws when two of the stages in `groups` are now one stage, which happens when a drag
-    /// takes a whole stage instead of one window. Waits for the stages to read the same three
-    /// times in a row first: while Stage Manager animates, windows of other stages briefly read
-    /// as current.
-    private static func checkForMerges(_ groups: [Set<CGWindowID>], after action: String) throws {
-        guard var latest = try? Snapshot.take() else { return }
-        func shape(_ snapshot: Snapshot) -> [Set<CGWindowID>] { snapshot.stages.map { Set($0.windowIDs) } }
-        var steady = 0
-        for _ in 0..<20 where steady < 2 {
-            usleep(150_000)
-            guard let next = try? Snapshot.take() else { return }
-            steady = shape(next) == shape(latest) ? steady + 1 : 0
-            latest = next
-        }
-        for stage in latest.stages where stage.kind != .overflow {
-            let ids = Set(stage.windowIDs)
-            let joined = groups.filter { !$0.isDisjoint(with: ids) }
-            guard joined.count > 1 else { continue }
-            let names = joined.map { group in
-                group.compactMap { latest.windows[$0] }.map { "\($0.appName) \"\($0.title)\"" }.sorted().joined(separator: ", ")
-            }
-            Log.write("After \(action), these stages are now one: \(names.map { "[\($0)]" }.joined(separator: " + ")).")
-            throw StageError.other("Two stages merged while \(action). See the log.")
-        }
+        try Backend.current.move(front, toStageWith: targetWindow, target: target, snapshot: snapshot)
     }
 
     /// Moves a window of the current stage (the front one when `chosen` is nil) into a new,
@@ -682,7 +448,7 @@ enum Actions {
     /// no way to do it.
     static func moveWindowToNewStage(_ chosen: CGWindowID?) throws {
         Engine.matchFocus()
-        guard Engine.active else { throw StageError.other("A new stage can only be made with Stage Manager turned off.") }
+        guard Backend.current.makesStages else { throw StageError.other("A new stage can only be made with Stage Manager turned off.") }
         let snapshot = try Snapshot.take()
         guard let front = chosen.flatMap({ snapshot.current.contains($0) ? $0 : nil }) ?? frontWindow(snapshot),
               let window = snapshot.windows[front] else {
@@ -714,7 +480,7 @@ enum Actions {
         let label = found.layout.stages[found.index].label ?? "that stage"
         // Stage Manager gives no way to split a window off: the strip hides while a dragged window
         // covers it, and a minimised window rejoins the current stage when restored.
-        if Engine.active, snapshot.current.count > 1 {
+        if Backend.current.makesStages, snapshot.current.count > 1 {
             try Engine.move([front], toStageWith: nil, snapshot: snapshot)
         } else if snapshot.current.count > 1 {
             throw StageError.other("Only a window that is alone in its stage can move into \(label): Stage Manager gives StageKeeper no way to split a window off into a new stage. Move this stage's other windows elsewhere first.")

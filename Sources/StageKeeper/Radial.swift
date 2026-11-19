@@ -57,8 +57,9 @@ final class RadialMenu {
         guard panel == nil else { return }
         let model: RadialModel
         do { model = try RadialModel.read(at: point) } catch { hooks.notify("\(error)"); return }
-        let size = RadialView.size
-        let offset = NSPoint(x: RadialView.centre.x * RadialView.scale, y: RadialView.centre.y * RadialView.scale)
+        let view = RadialView(model: model, menu: self)
+        let size = view.size
+        let offset = NSPoint(x: view.centre.x * RadialView.scale, y: view.centre.y * RadialView.scale)
         var origin = NSPoint(x: point.x - offset.x, y: point.y + offset.y - size.height)
         if let screen = NSScreen.screens.first(where: { NSMouseInRect(point, $0.frame, false) }) {
             let area = screen.visibleFrame
@@ -66,7 +67,6 @@ final class RadialMenu {
             origin.y = min(max(origin.y, area.minY), area.maxY - size.height)
         }
         let panel = RadialPanel(contentRect: NSRect(origin: origin, size: size))
-        let view = RadialView(model: model, menu: self)
         panel.contentView = view
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(view)
@@ -192,7 +192,7 @@ final class RadialPanel: NSPanel {
 
 /// What the menu shows, read once when it opens.
 struct RadialModel {
-    enum Target { case live(CGWindowID), saved(UUID), empty(UUID) }
+    enum Target { case live(CGWindowID), saved(UUID), empty(UUID), newStage }
 
     struct Window {
         let id: CGWindowID
@@ -221,10 +221,12 @@ struct RadialModel {
     var stages: [Stage] = []
     /// This desktop's labelled stages with no open windows, offered as places to move a window.
     var empty: [Stage] = []
-    /// The Move ring: labelled stages, open or not, in shortcut order, then unlabelled ones.
-    var moveTargets: [Stage] = []
+    /// Where Move can put the window, in arcs of eight across the bottom half of the menu: a new
+    /// stage, the other stages by recent use, then the labelled stages with no open windows.
+    var moreTargets: [Stage] = []
+    static let arcSize = 8, maxArcs = 3
     /// Whether Move offers a new stage: only StageKeeper's own stages can make one.
-    var canMakeStages = Engine.active
+    var canMakeStages = Backend.current.makesStages
     var others: [Stage] = []
     /// The window the menu acts on: the current stage's window under the pointer when the menu
     /// opened, else the front window.
@@ -237,47 +239,30 @@ struct RadialModel {
 
     static func read(at point: NSPoint) throws -> RadialModel {
         var model = RadialModel()
-        let snapshot = try Snapshot.take()
-        let layout = LayoutStore.load()
-        let indices = Matcher.savedIndices(layout, snapshot)
+        let list = try StageList.read()
+        let layout = list.layout, indices = list.indices, snapshot = list.snapshot
         let numbers = Dictionary(uniqueKeysWithValues: Actions.numbered().prefix(9).enumerated().map { ($1.id!, $0 + 1) })
         let shortcuts = Shortcuts.stages()
-        var all: [(stage: Stage, ids: [CGWindowID])] = []
-        // Overflow stages are ones the strip has no room for; switching to them works the same way.
-        let everywhere = Everywhere.ids()
-        var icons: [pid_t: NSImage] = [:]
-        for (index, stage) in snapshot.stages.enumerated() {
-            guard let first = stage.windowIDs.first else { continue }
-            let saved = indices[index].flatMap { layout?.stages[$0] }
-            let apps = stage.windowIDs.compactMap { snapshot.windows[$0]?.appName }
-                .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
-            let title = saved?.label ?? apps.joined(separator: ", ")
-            let entry = Stage(title: title, label: saved?.label, number: saved?.id.flatMap { numbers[$0] }, shortcut: saved?.id.flatMap { shortcuts[$0]?.display }, colour: saved?.color,
-                              isCurrent: stage.kind == .current, initial: String(apps.first?.prefix(1) ?? "·"),
-                              place: nil, target: .live(first),
-                              windows: stage.windowIDs.filter { !everywhere.contains($0) }.prefix(9).compactMap { id in
-                                  guard let window = snapshot.windows[id] else { return nil }
-                                  if icons[window.pid] == nil { icons[window.pid] = NSRunningApplication(processIdentifier: window.pid)?.icon }
-                                  return Window(id: id, app: window.appName, title: window.title, icon: icons[window.pid])
-                              })
-            if stage.kind == .current {
-                model.currentTitle = title
-                model.currentColour = saved?.color
-            }
-            all.append((entry, stage.windowIDs))
+        var byUse = list.entries.map { entry in
+            Stage(title: entry.title, label: entry.saved?.label, number: entry.saved?.id.flatMap { numbers[$0] },
+                  shortcut: entry.saved?.id.flatMap { shortcuts[$0]?.display }, colour: entry.saved?.color,
+                  isCurrent: entry.live.kind == .current, initial: String(entry.apps.first?.prefix(1) ?? "·"),
+                  place: nil, target: .live(entry.live.windowIDs[0]),
+                  windows: entry.windows.prefix(9).map { Window(id: $0.id, app: $0.app, title: $0.title, icon: $0.icon) })
         }
-        let byUse = FocusHistory.byRecentUse(all) { $0.ids }.map(\.stage)
+        if let current = list.current {
+            model.currentTitle = current.title
+            model.currentColour = current.saved?.color
+        }
+        for i in byUse.indices { byUse[i].position = i + 1 }
         model.stages = Array(byUse.prefix(8))
-        for i in model.stages.indices { model.stages[i].position = i + 1 }
         for (index, saved) in (layout?.stages ?? []).enumerated() where saved.label != nil && saved.id != nil && !indices.contains(index) {
             model.empty.append(Stage(title: saved.label!, label: saved.label, number: numbers[saved.id!], shortcut: shortcuts[saved.id!]?.display, colour: saved.color,
                                      isCurrent: false, initial: "", place: nil, target: .empty(saved.id!)))
         }
-        // Stages by recent use, then the labelled stages with no open windows, which keep their
-        // slots so a desktop with many stages cannot push them off the Move ring.
-        let emptySlots = min(model.empty.count, 4)
-        let liveSlots = (model.canMakeStages ? 7 : 8) - emptySlots
-        model.moveTargets = Array(byUse.prefix(liveSlots)) + model.empty.prefix(emptySlots)
+        let newStage = model.canMakeStages ? [Stage(title: "New stage", label: nil, number: nil, colour: nil, isCurrent: false, initial: "",
+                                                    place: nil, target: .newStage)] : []
+        model.moreTargets = Array((newStage + byUse.filter { !$0.isCurrent } + model.empty).prefix(Self.arcSize * Self.maxArcs))
 
         let desktops = Desktops.all()
         let current = Desktops.current().key
@@ -314,10 +299,13 @@ struct RadialModel {
 /// straight up, in degrees.
 final class RadialView: NSView {
     /// Drawn in a 600-point square and shown at `scale` of that size.
-    static let design = NSSize(width: 600, height: 640)
     static let scale: CGFloat = 0.75
-    static let size = NSSize(width: design.width * scale, height: design.height * scale)
-    static let centre = NSPoint(x: 300, y: 300)
+    /// The view grows to the right, left and downwards for each arc of Move stages; the centre
+    /// stays 300 points from the top, where the tile arc and the caption above it need it.
+    let design: NSSize
+    var size: NSSize { NSSize(width: design.width * Self.scale, height: design.height * Self.scale) }
+    let centre: NSPoint
+    private static let bandStart: CGFloat = 222, bandDepth: CGFloat = 76, bandStep: CGFloat = 82
     private let rCentre: CGFloat = 50, rInner: CGFloat = 140, rOuter: CGFloat = 216, rArc: CGFloat = 298
 
     static let tiles: [(name: String, part: CGRect)] = [
@@ -333,10 +321,10 @@ final class RadialView: NSView {
     ]
 
     private enum Mode { case switchStage, move, desktops, colour }
-    private enum Hover: Equatable { case none, centre, inner(Int), outer(Int), arc(Int), window(Int) }
-    /// What opens outside the menu: the tile positions, or the windows of the stage at an index
-    /// of the inner ring.
-    private enum Arc: Equatable { case none, tile, windows(Int) }
+    private enum Hover: Equatable { case none, centre, inner(Int), outer(Int), arc(Int), window(Int), more(Int) }
+    /// What opens outside the menu: the tile positions, the stages the Move ring has no room
+    /// for, or the windows of the stage at an index of the inner ring.
+    private enum Arc: Equatable { case none, tile, more, windows(Int) }
     private enum Item {
         case stage(RadialModel.Stage), colour(String, String?), empty, newStage
         var isEmpty: Bool { if case .empty = self { return true } else { return false } }
@@ -357,6 +345,9 @@ final class RadialView: NSView {
     }
     private var closingArc = Arc.none
     private var tileOpen: Bool { arc == .tile }
+    /// The tile and more-stages arcs open outside the outer ring; window arcs replace it.
+    private static func isOuter(_ arc: Arc) -> Bool { arc == .tile || arc == .more }
+    private var outerOpen: Bool { Self.isOuter(arc) }
     /// Opens a stage's window arc once the pointer has rested on the stage, so passing over
     /// stages on the way to the outer ring opens nothing.
     private var windowsTimer: Timer?
@@ -435,7 +426,14 @@ final class RadialView: NSView {
         }
         // Tile positions start from the middle; window slots are already ordered outwards from
         // the stage, two to a step.
-        let rank = arc == .tile ? abs(Double(i) - Double(count - 1) / 2) : Double((i + 1) / 2)
+        if arc == .more {
+            let size = RadialModel.arcSize, n = model.moreTargets.count
+            let inArc = min(size, n - i / size * size)
+            let rank = Double(i / size) + abs(Double(i % size) - Double(inArc - 1) / 2) * 0.5
+            let t = (since - rank * Self.arcStagger) / Self.arcTime
+            return (Self.easeOut(t), CGFloat(min(max(t * 3, 0), 1)))
+        }
+        let rank = Self.isOuter(arc) ? abs(Double(i) - Double(count - 1) / 2) : Double((i + 1) / 2)
         let t = (since - rank * Self.arcStagger) / Self.arcTime
         return (Self.easeOut(t), CGFloat(min(max(t * 3, 0), 1)))
     }
@@ -469,17 +467,36 @@ final class RadialView: NSView {
         switch arc {
         case .none: return []
         case .tile: return (0..<9).map { -80 + CGFloat($0) * 20 }
+        case .more:
+            let n = model.moreTargets.count, size = RadialModel.arcSize
+            return (0..<n).map { k in
+                let inArc = min(size, n - k / size * size)
+                return 180 + (CGFloat(k % size) - CGFloat(inArc - 1) / 2) * Self.moveStep
+            }
         case .windows(let i):
             let centre = CGFloat(i) * 360 / CGFloat(items.count)
             return Self.windowSlots.prefix(windows(arc).count).map { centre + $0 * 45 }
         }
     }
 
+    /// Each Move arc spans the bottom half: eight positions of 22.5 degrees.
+    private static let moveStep: CGFloat = 22.5
+
+    /// Inner and outer radius of the Move arc holding position `k`.
+    private func band(_ k: Int) -> (CGFloat, CGFloat) {
+        let r0 = Self.bandStart + CGFloat(k / RadialModel.arcSize) * Self.bandStep
+        return (r0, r0 + Self.bandDepth)
+    }
+
     init(model: RadialModel, menu: RadialMenu) {
         self.model = model
         self.radial = menu
-        super.init(frame: NSRect(origin: .zero, size: Self.size))
-        setBoundsSize(Self.design)
+        let arcs = (model.moreTargets.count + RadialModel.arcSize - 1) / RadialModel.arcSize
+        let reach = max(300, Self.bandStart + CGFloat(max(arcs - 1, 0)) * Self.bandStep + Self.bandDepth + 4)
+        centre = NSPoint(x: reach, y: 300)
+        design = NSSize(width: reach * 2, height: 300 + max(340, reach))
+        super.init(frame: NSRect(origin: .zero, size: NSSize(width: design.width * Self.scale, height: design.height * Self.scale)))
+        setBoundsSize(design)
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self))
         animate()
     }
@@ -498,11 +515,7 @@ final class RadialView: NSView {
     private var items: [Item] {
         switch effectiveMode {
         case .switchStage: return pad(model.stages.map { .stage($0) })
-        case .move:
-            guard model.canMakeStages else { return pad(model.moveTargets.map { .stage($0) }) }
-            // The last slot always makes a new stage, so a full ring still offers it.
-            let targets = model.moveTargets.prefix(7).map { Item.stage($0) }
-            return targets + Array(repeating: .empty, count: 7 - targets.count) + [.newStage]
+        case .move: return pad([])
         case .desktops: return pad(model.others.map { .stage($0) })
         case .colour: return Palette.colours.map { .colour($0.name, $0.hex) } + [.colour("No colour", nil)]
         }
@@ -534,7 +547,8 @@ final class RadialView: NSView {
         case .desktops:
             return model.others.isEmpty ? ("No labelled stages on other desktops", "Label stages there to list them here")
                 : ("\(model.otherDesktops) stages", "Switches desktop, then stage")
-        case .move: return ("Move the \(app) window to…", "Or hold ⌥ while pointing at a stage")
+        case .move:
+            return ("Move the \(app) window to…", "Point at a stage below · or hold ⌥")
         case .colour: return ("Colour \(model.currentTitle)", "Changes its dot and wallpaper")
         case .label: return ("Label \(model.currentTitle)…", "Opens the label dialog")
         case .save: return ("Save layout", "Saves this desktop's stages")
@@ -556,21 +570,21 @@ final class RadialView: NSView {
 
     private func point(_ radius: CGFloat, _ angle: CGFloat) -> NSPoint {
         let t = angle * .pi / 180
-        return NSPoint(x: Self.centre.x + radius * sin(t), y: Self.centre.y - radius * cos(t))
+        return NSPoint(x: centre.x + radius * sin(t), y: centre.y - radius * cos(t))
     }
 
     private func sector(_ r0: CGFloat, _ r1: CGFloat, _ a0: CGFloat, _ a1: CGFloat) -> NSBezierPath {
         let path = NSBezierPath()
         path.move(to: point(r1, a0))
-        path.appendArc(withCenter: Self.centre, radius: r1, startAngle: a0 - 90, endAngle: a1 - 90, clockwise: false)
+        path.appendArc(withCenter: centre, radius: r1, startAngle: a0 - 90, endAngle: a1 - 90, clockwise: false)
         path.line(to: point(r0, a1))
-        path.appendArc(withCenter: Self.centre, radius: r0, startAngle: a1 - 90, endAngle: a0 - 90, clockwise: true)
+        path.appendArc(withCenter: centre, radius: r0, startAngle: a1 - 90, endAngle: a0 - 90, clockwise: true)
         path.close()
         return path
     }
 
     private func hit(_ p: NSPoint) -> Hover {
-        let dx = p.x - Self.centre.x, dy = p.y - Self.centre.y
+        let dx = p.x - centre.x, dy = p.y - centre.y
         let r = hypot(dx, dy)
         var a = atan2(dx, -dy) * 180 / .pi
         if a < 0 { a += 360 }
@@ -581,6 +595,17 @@ final class RadialView: NSView {
                 if abs(d) < 22.5 { return .window(k) }
             }
             return .window(-1)  // where an empty slot would be: does nothing
+        }
+        if arc == .more, r >= rOuter {
+            let angles = angles(arc)
+            for (k, angle) in angles.enumerated() {
+                let (r0, r1) = band(k)
+                guard r >= r0 - 6, r < r1 else { continue }
+                var d = (a - angle).truncatingRemainder(dividingBy: 360)
+                if d > 180 { d -= 360 } else if d < -180 { d += 360 }
+                if abs(d) < Self.moveStep / 2 { return .more(k) }
+            }
+            if r < band(max(angles.count - 1, 0)).1 && a > 90 && a < 270 { return .more(-1) }
         }
         if tileOpen, r >= rOuter, r <= rArc + 16 {
             for (k, angle) in angles(arc).enumerated() {
@@ -612,7 +637,8 @@ final class RadialView: NSView {
         // the pointer rests on the stage; once they are showing, they change to another stage's
         // windows, or close at the centre, only after the pointer rests there too, so crossing
         // other stages or the centre on the way to a window leaves them open.
-        if next != hover {
+        syncMoveArc()
+        if next != hover, effectiveMode != .move {
             windowsTimer?.invalidate()
             windowsTimer = nil
             let showingWindows: Bool = { if case .windows = arc { return true } else { return false } }()
@@ -647,7 +673,13 @@ final class RadialView: NSView {
     override func mouseMoved(with event: NSEvent) { pointerMoved(to: convert(event.locationInWindow, from: nil)) }
     override func mouseDragged(with event: NSEvent) { pointerMoved(to: convert(event.locationInWindow, from: nil)) }
 
-    override func flagsChanged(with event: NSEvent) { needsDisplay = true }
+    override func flagsChanged(with event: NSEvent) { syncMoveArc(); needsDisplay = true }
+
+    /// In Move, the stages show in the arcs below the menu, in place of the stages ring.
+    private func syncMoveArc() {
+        if effectiveMode == .move, !model.moreTargets.isEmpty { if arc != .more { arc = .more } }
+        else if arc == .more { arc = .none }
+    }
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { radial?.close(animated: true) } else { super.keyDown(with: event) }
@@ -664,6 +696,14 @@ final class RadialView: NSView {
             else if mode == .switchStage { menu.showOverview() } else { mode = .switchStage; needsDisplay = true }
         case .arc(let i):
             menu.tile(model.window, Self.tiles[i].part)
+        case .more(let i):
+            guard model.moreTargets.indices.contains(i) else { break }
+            switch model.moreTargets[i].target {
+            case .live(let id): menu.move(model.window, to: id)
+            case .empty(let id): menu.moveToEmpty(model.window, id)
+            case .newStage: menu.moveToNewStage(model.window)
+            case .saved: break
+            }
         case .window(let k):
             let list = windows(arc)
             if list.indices.contains(k) { menu.show(list[k].id) }
@@ -680,6 +720,8 @@ final class RadialView: NSView {
                     menu.moveToEmpty(model.window, id)
                 case (_, .live(let id)):
                     if stage.isCurrent { menu.close() } else { menu.switchTo(id) }
+                case (_, .newStage):
+                    menu.moveToNewStage(model.window)
                 case (_, .saved(let id)):
                     menu.switchSaved(id)
                 }
@@ -693,6 +735,7 @@ final class RadialView: NSView {
             case .move:
                 mode = mode == .move ? .switchStage : .move
                 arc = .none
+                syncMoveArc()
                 Log.write("Radial menu: Move chosen (\(mode == .move ? "on" : "off")).")
             case .colour: mode = mode == .colour ? .switchStage : .colour; arc = .none
             case .label: menu.label()
@@ -716,9 +759,9 @@ final class RadialView: NSView {
         guard alpha > 0, let context = NSGraphicsContext.current?.cgContext else { return }
         context.saveGState()
         defer { context.restoreGState() }
-        context.translateBy(x: Self.centre.x, y: Self.centre.y)
+        context.translateBy(x: centre.x, y: centre.y)
         context.scaleBy(x: scale, y: scale)
-        context.translateBy(x: -Self.centre.x, y: -Self.centre.y)
+        context.translateBy(x: -centre.x, y: -centre.y)
         context.setAlpha(alpha)
         context.beginTransparencyLayer(auxiliaryInfo: nil)
         defer { context.endTransparencyLayer() }
@@ -732,14 +775,14 @@ final class RadialView: NSView {
         context.setShadow(offset: CGSize(width: 0, height: -10), blur: 24, color: NSColor(white: 0, alpha: 0.55).cgColor)
         context.beginTransparencyLayer(auxiliaryInfo: nil)
         Self.outerFill.setFill()
-        NSBezierPath(ovalIn: NSRect(x: Self.centre.x - rInner, y: Self.centre.y - rInner, width: rInner * 2, height: rInner * 2)).fill()
+        NSBezierPath(ovalIn: NSRect(x: centre.x - rInner, y: centre.y - rInner, width: rInner * 2, height: rInner * 2)).fill()
         let (actionsLevel, actionsAlpha) = self.actionsLevel
         for (i, action) in Action.allCases.enumerated() where actionsAlpha > 0 {
             let a = CGFloat(i) * 45
             let direction = point(1, a)
             let distance = (1 - actionsLevel) * (rOuter - rInner)
             context.saveGState()
-            context.translateBy(x: (Self.centre.x - direction.x) * distance, y: (Self.centre.y - direction.y) * distance)
+            context.translateBy(x: (centre.x - direction.x) * distance, y: (centre.y - direction.y) * distance)
             context.setAlpha(actionsAlpha)
             let path = sector(rInner, rOuter, a - 22.5, a + 22.5)
             Self.outerFill.setFill(); path.fill()
@@ -770,7 +813,8 @@ final class RadialView: NSView {
             case .empty, .newStage: break
             }
             if let tint {
-                tint.withAlphaComponent(hovered ? 0.42 : 0.2).setFill(); path.fill()
+                if case .stage = item { Self.stageFill(tint, hovered: hovered).setFill() } else { tint.withAlphaComponent(hovered ? 0.42 : 0.2).setFill() }
+                path.fill()
             } else if hovered, !item.isEmpty {
                 NSColor(white: 1, alpha: 0.14).setFill(); path.fill()
             }
@@ -787,11 +831,11 @@ final class RadialView: NSView {
         }
 
         // Centre.
-        let centreRect = NSRect(x: Self.centre.x - rCentre, y: Self.centre.y - rCentre, width: rCentre * 2, height: rCentre * 2)
+        let centreRect = NSRect(x: centre.x - rCentre, y: centre.y - rCentre, width: rCentre * 2, height: rCentre * 2)
         Self.centreFill.setFill()
         NSBezierPath(ovalIn: centreRect).fill()
         if hover == .centre { NSColor(white: 1, alpha: 0.12).setFill(); NSBezierPath(ovalIn: centreRect).fill() }
-        drawSymbol(mode == .switchStage ? "square.grid.2x2" : "chevron.left", at: Self.centre, size: 20, colour: Self.primary)
+        drawSymbol(mode == .switchStage ? "square.grid.2x2" : "chevron.left", at: centre, size: 20, colour: Self.primary)
 
         drawCaption()
     }
@@ -800,7 +844,7 @@ final class RadialView: NSView {
     /// nil, over the outer ring and under the inner ring), opening or closing.
     private func drawArc(_ only: Arc?) {
         for (shown, opening) in [(closingArc, false), (arc, true)] where shown != .none && (opening || closingArc != arc) {
-            if (shown == .tile) == (only == .tile) { drawArc(shown, opening: opening) }
+            if Self.isOuter(shown) == (only == .tile) { drawArc(shown, opening: opening) }
         }
     }
 
@@ -813,19 +857,26 @@ final class RadialView: NSView {
             guard alpha > 0 else { continue }
             // Each position keeps its final shape and slides out from under the ring inside it,
             // which is drawn over it.
-            let tile = shown == .tile
-            let distance = (1 - level) * (tile ? rArc - rOuter : rOuter - rInner)
+            let tile = Self.isOuter(shown)
+            let (r0, r1) = shown == .more ? band(i) : (rOuter + 6, rArc)
+            let distance = (1 - level) * (tile ? r1 - rOuter : rOuter - rInner)
             let direction = point(1, a)
             context.saveGState()
-            context.translateBy(x: (Self.centre.x - direction.x) * distance, y: (Self.centre.y - direction.y) * distance)
+            context.translateBy(x: (centre.x - direction.x) * distance, y: (centre.y - direction.y) * distance)
             context.setAlpha(alpha)
-            let path = tile ? sector(rOuter + 6, rArc, a - 10, a + 10) : sector(rInner, rOuter, a - 22.5, a + 22.5)
+            let half = shown == .more ? Self.moveStep / 2 : 10
+            let path = tile ? sector(r0, r1, a - half, a + half) : sector(rInner, rOuter, a - 22.5, a + 22.5)
             Self.outerFill.setFill(); path.fill()
-            let hovered = opening && (shown == .tile ? hover == .arc(i) : hover == .window(i))
+            if shown == .more, i < model.moreTargets.count, let hex = model.moreTargets[i].colour {
+                Self.stageFill(Palette.color(hex), hovered: hover == .more(i)).setFill(); path.fill()
+            }
+            let hovered = opening && (shown == .tile ? hover == .arc(i) : shown == .more ? hover == .more(i) : hover == .window(i))
             if hovered { NSColor(white: 1, alpha: 0.16).setFill(); path.fill() }
             Self.separator.setStroke(); path.lineWidth = 1; path.stroke()
             if shown == .tile {
                 drawTile(Self.tiles[i].part, at: point(262, a))
+            } else if shown == .more {
+                if i < model.moreTargets.count { drawMore(model.moreTargets[i], at: point((r0 + r1) / 2, a), width: 2 * r0 * sin(Self.moveStep / 2 * .pi / 180) - 12) }
             } else if i < list.count {
                 drawWindow(list[i], at: a)
             }
@@ -844,6 +895,14 @@ final class RadialView: NSView {
         let text = NSAttributedString(string: window.title.isEmpty ? window.app : window.title, attributes: [
             .font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: Self.secondary, .paragraphStyle: style])
         text.draw(with: NSRect(x: p.x - 45, y: p.y + 8, width: 90, height: 15), options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+    }
+
+    /// A stage in a Move arc, drawn as in the stages ring.
+    private func drawMore(_ stage: RadialModel.Stage, at p: NSPoint, width: CGFloat) {
+        if case .newStage = stage.target { drawItem(.newStage, at: p, width: width); return }
+        var shown = stage
+        if shown.label == nil { shown.label = "\(stage.position) · \(stage.title)" }
+        drawItem(.stage(shown), at: p, width: width)
     }
 
     private func drawTile(_ part: CGRect, at p: NSPoint) {
@@ -901,19 +960,17 @@ final class RadialView: NSView {
             if hex == model.currentColour { ring(rect) }
         case .stage(let stage):
             if let label = stage.label {
-                // The label, with the stage's colour as a dot above it.
-                var top = p.y - 9
-                if let hex = stage.colour {
-                    Palette.color(hex).setFill()
-                    NSBezierPath(ovalIn: NSRect(x: p.x - 6, y: p.y - 20, width: 12, height: 12)).fill()
-                    top = p.y - 4
-                }
+                // The label, on the stage's colour, which fills the tile.
+                let top = p.y - 9
                 let style = NSMutableParagraphStyle()
                 style.alignment = .center
                 let fitted = Self.fit(label, width: width)
                 let text = NSAttributedString(string: fitted.text, attributes: [
                     .font: NSFont.systemFont(ofSize: fitted.size, weight: .semibold), .paragraphStyle: style,
-                    .foregroundColor: { if case .empty = stage.target { return Self.secondary } else { return Self.primary } }()])
+                    .foregroundColor: {
+                        if let hex = stage.colour { return Self.contrast(on: Self.stageFill(Palette.color(hex), hovered: false)) }
+                        if case .empty = stage.target { return Self.secondary } else { return Self.primary }
+                    }()])
                 let box = NSRect(x: p.x - width / 2, y: top + (14 - fitted.size) / 2, width: width, height: 20)
                 text.draw(with: box, options: [.usesLineFragmentOrigin])
             } else {
@@ -938,6 +995,12 @@ final class RadialView: NSView {
         ring.lineWidth = 2
         Self.primary.setStroke()
         ring.stroke()
+    }
+
+    /// A coloured stage's tile: its colour, darkened towards the ring so white text reads on most
+    /// colours, and lighter while pointed at.
+    private static func stageFill(_ colour: NSColor, hovered: Bool) -> NSColor {
+        colour.blended(withFraction: hovered ? 0.2 : 0.4, of: innerFill) ?? colour
     }
 
     private static func contrast(on colour: NSColor) -> NSColor {
@@ -968,12 +1031,12 @@ final class RadialView: NSView {
         var title: String, detail: String
         switch effectiveMode {
         case .switchStage: modeName = "Switch stage"; title = "Point at a stage"; detail = "Click to switch · hold ⌥ to move the \(app) window"
-        case .move: modeName = "Move window"; title = "Move the \(app) window"; detail = "Point at the stage to move it to"
+        case .move: modeName = "Move window"; title = "Move the \(app) window"; detail = "Point at a stage below"
         case .desktops: modeName = model.otherDesktops; title = model.otherDesktops; detail = "Point at a stage to switch desktop and stage"
         case .colour: modeName = "Colour stage"; title = "Colour for \(model.currentTitle)"; detail = "Changes its dot and wallpaper"
         }
         switch hover {
-        case .centre where arc != .none && arc != .tile:
+        case .centre where arc != .none && !outerOpen:
             title = "Back to the actions"
             detail = "Rest here or click"
         case .centre:
@@ -984,6 +1047,13 @@ final class RadialView: NSView {
         case .arc(let i):
             title = Self.tiles[i].name
             detail = "Tile the \(app) window"
+        case .more(let i):
+            if model.moreTargets.indices.contains(i) {
+                let stage = model.moreTargets[i]
+                title = "Move the \(app) window to \(stage.title)"
+                if case .newStage = stage.target { title = "Move the \(app) window to a new stage"; detail = "It becomes a stage of its own" }
+                else if case .empty = stage.target { detail = "No open windows · the window becomes this stage" } else { detail = "Keeps its size and position" }
+            }
         case .window(let k):
             let list = windows(arc)
             if list.indices.contains(k), case .windows(let i) = arc {
@@ -993,6 +1063,7 @@ final class RadialView: NSView {
             }
         case .inner(let i):
             switch items[i] {
+            case .empty where effectiveMode == .move: title = "Move the \(app) window"; detail = "Point at a stage below"
             case .empty: title = "Empty"; detail = "Up to 8 stages per desktop"
             case .newStage: title = "Move the \(app) window to a new stage"; detail = "It becomes a stage of its own"
             case .colour(let name, let hex): title = name; detail = hex == model.currentColour ? "Current colour" : "Colour \(model.currentTitle)"
@@ -1017,6 +1088,7 @@ final class RadialView: NSView {
             }
         case .none:
             if tileOpen { title = "Tile the \(app) window"; detail = "Point at a position in the arc" }
+            if arc == .more { title = "Move the \(app) window"; detail = "Point at a stage below" }
         }
         return (modeName.uppercased(), title, detail)
     }
@@ -1031,13 +1103,16 @@ final class RadialView: NSView {
         let strings = lines.map { NSAttributedString(string: $0.0, attributes: [.font: $0.1, .foregroundColor: $0.2]) }
         let width = min(560, (strings.map { $0.size().width }.max() ?? 0) + 32)
         let height = strings.reduce(CGFloat(16)) { $0 + $1.size().height + 2 }
-        let box = NSRect(x: Self.centre.x - width / 2, y: Self.centre.y + rOuter + 14, width: width, height: height)
+        // The more-stages arc fills the space below the menu, so the caption goes above it then.
+        let above = arc == .more || closingArc == .more && animating
+        let top = above ? max(0, centre.y - rOuter - 8 - height) : centre.y + rOuter + 14
+        let box = NSRect(x: centre.x - width / 2, y: top, width: width, height: height)
         NSColor(srgbRed: 0.07, green: 0.07, blue: 0.08, alpha: 0.9).setFill()
         NSBezierPath(roundedRect: box, xRadius: 12, yRadius: 12).fill()
         var y = box.minY + 8
         for string in strings {
             let s = string.size()
-            let clipped = NSRect(x: max(box.minX + 12, Self.centre.x - s.width / 2), y: y, width: min(s.width, box.width - 24), height: s.height)
+            let clipped = NSRect(x: max(box.minX + 12, centre.x - s.width / 2), y: y, width: min(s.width, box.width - 24), height: s.height)
             string.draw(with: clipped, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
             y += s.height + 2
         }

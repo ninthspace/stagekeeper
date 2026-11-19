@@ -239,12 +239,19 @@ struct Snapshot {
     /// Every window Accessibility lists, on whichever desktops are showing.
     static func accessibleWindows() -> [CGWindowID: LiveWindow] { readWindows().0 }
 
+    /// Normal windows front to back. Only the on-screen list is in stacking order; the full list
+    /// mixes in off-screen windows out of order, so those follow the on-screen ones.
     static func zOrder() -> [CGWindowID] {
-        let info = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-        return info.compactMap { entry in
-            guard (entry[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 else { return nil }
-            return (entry[kCGWindowNumber as String] as? NSNumber)?.uint32Value
+        func ids(_ options: CGWindowListOption) -> [CGWindowID] {
+            let info = CGWindowListCopyWindowInfo(options.union(.excludeDesktopElements), kCGNullWindowID) as? [[String: Any]] ?? []
+            return info.compactMap { entry in
+                guard (entry[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 else { return nil }
+                return (entry[kCGWindowNumber as String] as? NSNumber)?.uint32Value
+            }
         }
+        let onScreen = ids(.optionOnScreenOnly)
+        let seen = Set(onScreen)
+        return onScreen + ids(.optionAll).filter { !seen.contains($0) }
     }
 
     private static func onScreenWindowIDs() -> Set<CGWindowID> {

@@ -34,6 +34,12 @@ enum Palette {
         colours.first { $0.hex == hex }?.name ?? hex
     }
 
+    /// The wallpaper for a stage colour: the colour taken halfway to a dark grey, so a whole
+    /// screen of it is quiet and its hue still tells stages apart.
+    static func wallpaper(_ hex: String) -> NSColor {
+        color(hex).blended(withFraction: 0.5, of: NSColor(srgbRed: 0.15, green: 0.15, blue: 0.16, alpha: 1)) ?? color(hex)
+    }
+
     static func color(_ hex: String) -> NSColor {
         let value = UInt32(hex.dropFirst(), radix: 16) ?? 0
         return NSColor(srgbRed: CGFloat((value >> 16) & 0xFF) / 255,
@@ -76,7 +82,7 @@ enum Wallpaper {
                 let options: [NSWorkspace.DesktopImageOptionKey: Any] = [
                     .imageScaling: NSImageScaling.scaleAxesIndependently.rawValue,
                     .allowClipping: true,
-                    .fillColor: Palette.color(hex),
+                    .fillColor: Palette.wallpaper(hex),
                 ]
                 do { try workspace.setDesktopImageURL(url, for: screen, options: options) }
                 catch { Log.write("Could not set wallpaper: \(error)") }
@@ -98,14 +104,14 @@ enum Wallpaper {
 
     /// A small solid PNG per colour; macOS stretches it to fill the screen.
     private static func image(for hex: String) -> URL? {
-        let url = Paths.wallpapers.appendingPathComponent(String(hex.dropFirst()) + ".png")
+        let url = Paths.wallpapers.appendingPathComponent(String(hex.dropFirst()) + "-soft.png")
         if FileManager.default.fileExists(atPath: url.path) { return url }
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16, bitsPerSample: 8,
                                          samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                          colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-        Palette.color(hex).setFill()
+        Palette.wallpaper(hex).setFill()
         NSRect(x: 0, y: 0, width: 16, height: 16).fill()
         NSGraphicsContext.restoreGraphicsState()
         guard let data = rep.representation(using: .png, properties: [:]) else { return nil }

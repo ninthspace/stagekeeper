@@ -41,3 +41,4 @@ security import "$WORK/identity.p12" -k "$KEYCHAIN" -P "$PASS" -T /usr/bin/codes
 
 echo "Created \"$NAME\" in the login keychain."
 echo "Run ./scripts/install.sh, then allow StageKeeper in Accessibility one last time."
+echo "If an earlier ad hoc build was allowed, first run: tccutil reset Accessibility local.stagekeeper"

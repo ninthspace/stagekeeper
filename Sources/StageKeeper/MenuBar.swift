@@ -168,7 +168,10 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Engine.noticeNewWindows()
             Engine.follow()
             if check { Engine.reconcile() }
-            DispatchQueue.main.async { self?.following = false }
+            DispatchQueue.main.async {
+                self?.following = false
+                CornerCover.shared.update()
+            }
         }
     }
 

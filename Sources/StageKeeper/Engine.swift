@@ -661,8 +661,13 @@ enum Screens {
     /// right), less one point so macOS leaves a window put there. One real screen's corner,
     /// since the corner of all screens together can lie on none of them.
     static var hidingCorner: CGPoint {
-        guard let screen = NSScreen.screens.max(by: { ($0.frame.maxX, -$0.frame.minY) < ($1.frame.maxX, -$1.frame.minY) }) else { return .zero }
+        guard let screen = hidingScreen else { return .zero }
         let frame = toAX(screen.frame)
         return CGPoint(x: frame.maxX - 1, y: frame.maxY - 1)
+    }
+
+    /// The screen whose bottom-right corner holds hidden windows.
+    static var hidingScreen: NSScreen? {
+        NSScreen.screens.max { ($0.frame.maxX, -$0.frame.minY) < ($1.frame.maxX, -$1.frame.minY) }
     }
 }

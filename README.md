@@ -24,7 +24,7 @@ To remove it, run `./scripts/uninstall.sh`. The saved layouts are kept.
 
 ## Stages
 
-- **Switching** moves the current stage's windows into the bottom-right corner of the rightmost screen, with one point showing, and moves the new stage's windows back to where they were. Switch with the radial menu, the menu-bar menu, All stages, the shortcuts or the Dock apps.
+- **Switching** moves the current stage's windows into the bottom-right corner of the rightmost screen, with one point showing, and moves the new stage's windows back to where they were. A small window of StageKeeper's covers that corner, painted like the wallpaper, so the hidden windows do not show (see [Hiding windows](#hiding-windows)). Switch with the radial menu, the menu-bar menu, All stages, the shortcuts or the Dock apps.
 - **New windows** join the current stage within about half a second. A new tab of an app with native tabs (Ghostty, Finder) joins its tab group's stage. A new window that opens mostly off screen (apps place a new window by their last one, which may be hidden) is moved to the middle of the screen.
 - **Bringing a hidden window forward** yourself (⌘Tab, the Dock, an app's Window menu, Mission Control) switches to its stage.
 - **Moving a window** to another stage, or to a new stage of its own: Move in the radial menu, or **Move Front Window To** in the menu-bar menu. Background tabs of the window go with it.
@@ -57,7 +57,7 @@ macOS has no public way to count the fingers on a trackpad, so StageKeeper reads
 
 A four-finger swipe down, or the centre of the radial menu, shows every stage on this desktop as a small screen with its windows drawn as boxes at their position and size, each with its app's icon and title, most recently used first. Click one to switch to it; swipe down again or press Esc to close it. The swipe works only while App Exposé is not set to a four-finger swipe down in System Settings › Trackpad › More Gestures.
 
-Mission Control shows hidden windows too, small, because they sit in the screen's corner. Turning on System Settings › Desktop & Dock › Mission Control › "Group windows by application" lays them out larger.
+Mission Control shows hidden windows too, small, because they sit in the screen's corner under the cover. Turning on System Settings › Desktop & Dock › Mission Control › "Group windows by application" lays them out larger.
 
 ## Bookmarked windows
 
@@ -71,6 +71,15 @@ Each desktop has its own stages and its own saved layout.
 - The menu lists the stages of the desktop you are on, then the labelled stages of your other desktops under "Desktop 2" and so on.
 - Shortcuts and Dock apps work for stages on any desktop. For a stage on another desktop, StageKeeper presses that desktop's "Switch to Desktop N" shortcut when you have turned it on (System Settings › Keyboard › Keyboard Shortcuts › Mission Control), and otherwise ⌃← or ⌃→ until that desktop shows.
 - With a separate desktop per display, StageKeeper manages the windows of the desktop that is active.
+
+### More than one display
+
+How stages work across displays depends on System Settings › Desktop & Dock › "Displays have separate Spaces". Changing it takes effect after you log out and back in.
+
+- **On** (the macOS default): each display has its own desktop, and so its own stages and saved layout. Switching stages changes only the display you are working on; the windows on the other displays belong to their own desktops' stages and stay where they are. The radial menu, the menu bar and the shortcuts act on the desktop of the display that is active, which is the one holding the focused window.
+- **Off:** one desktop spans every display. A stage holds windows on any display, and switching stages changes every display at once.
+
+Hidden windows from every desktop sit in the corner of the rightmost screen, but each still belongs to the desktop that hid it. Bringing one forward from Mission Control, the Dock or a window menu switches to its stage on its own desktop, and the window goes back to its own display.
 
 ## Colours
 
@@ -130,17 +139,88 @@ The app icon's source is `Resources/AppIcon.svg`. After changing it, run `swift 
 
 ## How it works
 
-**Windows.** Window titles, positions and sizes come from each app's accessibility windows; the private `_AXUIElementGetWindow` call maps each one to its window ID. Only windows on the active desktop count (`SLSCopySpacesForWindows`). A window leaves its stage only when the window server no longer has it, so an app that briefly lists no windows, as after waking from sleep, does not lose its stages.
+macOS gives an app no public way to hide one window, count fingers on a trackpad, or tell which desktop a window is on. StageKeeper gets there with Accessibility, a few long-stable private calls, and some workarounds for how macOS behaves. This section lists them, so the reasons for code that looks odd are written down.
 
-**Hiding.** macOS has no public way to hide one window, so a hidden window is moved to the bottom-right corner of the rightmost screen, and its frame is recorded so it can go back. Switching plans the moves under a lock and carries them out after, so a slow app does not hold up the menu.
+### Reading windows
 
-**Following focus.** When the focused window belongs to another stage, StageKeeper switches to that stage, except for 1.5 seconds after it has switched or moved windows itself.
+- **Windows and their IDs.** Titles, positions and sizes come from each app's Accessibility windows. The private `_AXUIElementGetWindow` call maps each one to its window ID, which the window server and SkyLight calls use.
+- **Which desktop.** The private SkyLight call `SLSCopySpacesForWindows` says which desktop (Space) each window is on, and `SLSGetActiveSpace` and `SLSCopyManagedDisplaySpaces` give the active desktop and the desktops of each display. A desktop is keyed by the UUID macOS stores for it, which survives restarts; the first desktop on the main display has an empty UUID and is called `main`.
+- **Windows that seem to vanish.** Accessibility can report no windows, or only some, while the Mac wakes or the screen is locked. A window leaves its stage only when the window server's own list (`CGWindowListCopyWindowInfo`) no longer has it, so stages do not merge or empty after wake.
+- **Apps that do not answer.** An app that never answers Accessibility (Solo, for one) costs a one-second timeout on every read. After two misses in a row StageKeeper skips it for 30 seconds, doubling up to 5 minutes, but never while it is the frontmost app. An app that is only busy misses one read and is not skipped.
+- **Window IDs after a restart.** macOS reuses window IDs after a restart, so saved IDs are trusted only within the boot they were saved in; otherwise windows are matched by app and title.
 
-**Labels.** Each stage records which saved stage it is, so a label stays with its stage when windows move between stages.
+### Hiding windows
+
+- **The corner.** A hidden window is moved to the bottom-right corner of the rightmost screen, less one point, and its frame is recorded so it can go back. macOS moves a window back on screen if none of it shows. Hiding the app would hide all its windows, and minimising animates and fills the Dock.
+- **What stays visible.** macOS keeps a window's title bar on screen, so each hidden window leaves a strip one point wide and 30 to 65 points tall in the corner, with its shadow around it. StageKeeper covers the corner with a small window of its own, 72 by 150 points, above other windows. It is painted with what the wallpaper shows there: the stage colour, or the matching crop of your wallpaper image placed as macOS places it. It ignores clicks and stays out of Mission Control, and is shown only while windows are hidden. It reads the wallpaper every 0.4 seconds, so a new stage colour reaches it within half a second. With a moving or aerial wallpaper it paints the wallpaper's still image, which may differ a little from what shows.
+- **One real screen's corner.** The corner of all screens together can lie on no screen, so the corner of the rightmost screen is used (the lowest, of screens equally far right).
+- **Windows already off screen.** A window that is already off screen when hidden has no frame worth keeping, so none is recorded and it comes to the middle of the screen when its stage shows.
+- **Slow apps.** Switching plans the moves under a lock and carries them out after, so an app that is slow to move a window does not hold up the menu or the other moves.
+- **Putting windows back.** When StageKeeper quits, or Stage Manager is turned on, it puts every hidden window it can reach back. Quitting by signal (`kill`, `install.sh`) skips the normal quit handler, so StageKeeper catches the signals itself. Accessibility lists only the windows of desktops that are showing, so windows hidden on another desktop keep their record and go back when that desktop shows.
+- **Screens changing.** When a display is connected, removed or rearranged, hidden windows move to the new corner.
+
+### Hidden windows across displays
+
+With "Displays have separate Spaces" on, each display has its own desktop, and macOS counts a window as on the desktop of the display it touches. Every hidden window touches the rightmost screen, so without the steps below:
+
+- the active desktop lost all its stages but the current one, because their windows counted as on another desktop;
+- the rightmost display's desktop took those windows into its own current stage and moved them to the middle of the screen;
+- clicking a hidden window in Mission Control or the Dock made the rightmost display's desktop active, so StageKeeper did not switch to the window's stage.
+
+What StageKeeper does instead:
+
+- **Hidden windows belong to the desktop that hid them.** Reading a desktop keeps the windows it hid, wherever they sit, and leaves out the windows other desktops hid. A desktop that took in another desktop's hidden windows gives them up.
+- **Switching across displays.** When the focused window is one another desktop hid, and that desktop is showing on its display, StageKeeper switches that desktop's stage. It does this while acting as that desktop, so its reads and moves use that desktop's windows and state although another display is active.
+
+Tried and dropped:
+
+- **Hiding below the desktop's own screen**, so each window stays on its own display's desktop. macOS moves the windows up until their title bars show, which left a strip of windows along the bottom of the screen.
+- **Making hidden windows transparent.** Setting another app's window transparency (`SLSSetWindowAlpha`) needs System Integrity Protection off. With it on, macOS accepts the call and does nothing.
+- **Hiding apps whose windows are all hidden.** It removes the strip for those apps, but hidden apps leave Mission Control.
+
+### Following focus
+
+- **Polling.** Picking a window from an app's Dock menu or Window menu changes the focused window without activating an app, so no notification arrives. StageKeeper checks the focused window every 0.4 seconds.
+- **Settling.** For 1.5 seconds after StageKeeper switches or moves windows itself it does not follow focus: until the new stage's app comes forward, the app you left still reports its now hidden window as focused.
+- **Keeping the screen in step.** Every two seconds a cheap read of the window server decides whether any window is out of step with its stage; only then does the full Accessibility read run. It is skipped while the focused window is in another stage, since following focus is about to switch to it.
+
+### Tabs
+
+Apps with native tabs (Ghostty, Finder) make each tab a window of its own, and Accessibility lists only the selected tab. A background tab looks new when it comes forward, so a new window that shares the frame of another window of the same app joins that window's stage; in the hiding corner, where every hidden window shares the corner, the size decides. Moving a window to another stage takes the stage's unlisted windows of the same app with it, as those are its background tabs.
+
+### Desktops
+
+- **Switching desktop.** For a stage on another desktop, StageKeeper presses Mission Control's "Switch to Desktop N" shortcut, which macOS stores as symbolic hot keys 118 to 133, when it is turned on. Otherwise it presses ⌃← or ⌃→ once per desktop between here and there. Failing that, it activates an app from the stage, which macOS follows to a desktop where the app has windows, unless it also has windows on this one.
+- **Shortcut numbers.** Automatic shortcuts are numbered per desktop in order, so labelling a stage on one desktop does not renumber another desktop's stages.
+
+### Trackpad
+
+- **Counting fingers.** macOS has no public way to tell how many fingers are down, so StageKeeper reads them through the private MultitouchSupport framework, as BetterTouchTool and MiddleClick do.
+- **Four-finger click.** An event tap takes the click, and the drag and release after it, out of the event stream so the app under the pointer does not see it. macOS can turn an event tap off without telling it, for example while the screen is locked, so StageKeeper checks it every few seconds.
+- **Four-finger tap and swipe.** macOS sends no event for a tap of more than two fingers, so StageKeeper recognises one from the raw finger data: four fingers down and lifted within 0.3 seconds without moving or pressing. A swipe down is four fingers moving down far enough, more down than sideways.
+- **After sleep.** The trackpad stops sending touches after sleep or a screen lock. StageKeeper waits for the driver to come back, then starts listening again; unlock and screen wake can arrive together, so only the last one restarts it.
+
+### Radial menu
+
+- **Not taking focus.** The menu is a non-activating panel, so the app you were using stays in front and its window stays the one Tile, Bookmark and Move act on.
+- **Closing.** A choice hides the menu at once rather than animating, because the window moves that follow hold up the main thread and would stop the animation part-way.
+- **⌥ for Move.** The ⌥ key is read from the keyboard as it is now, rather than from the last event, so a missed key-up cannot leave the menu in Move.
+
+### Shortcuts, Dock apps and wallpaper
+
+- **Shortcuts** use the Carbon hot-key API, which needs no extra permission. Fetch Bookmarked Windows is registered only while a window is bookmarked, so its key stays free for other apps otherwise.
+- **Dock apps** are small apps that open `stagekeeper://switch/<stage id>`. Each finds its stage by the ID in its Info.plist, so a rename renames the app in place. Finder and the Dock show `/` as `:`, and `:` is not allowed in a file name, so both become `-` in the app's name.
+- **Wallpaper colours** are 16-pixel PNGs that macOS stretches to fill the screen. macOS sets a wallpaper for the desktop showing on each screen, so your own wallpaper is recorded per screen and desktop.
+- **Labels** stay with their stage: each stage records which saved stage it is, so a label stays when windows move between stages.
+
+### Permissions and signing
+
+- Switching stages from the Dock apps and `stagekeeper switch` goes through the menu-bar app (`stagekeeper://switch/<id>`), so those need no Accessibility permission of their own. The other commands read windows themselves and need it for the terminal.
+- macOS ties the Accessibility permission to the code signature. An ad hoc signature changes with every build, so `make-signing-cert.sh` creates a self-signed certificate that keeps the permission across reinstalls. An entry allowed for an ad hoc build stays switched on but no longer applies; `tccutil reset Accessibility local.stagekeeper` clears it.
 
 ## Limits
 
 - Restore matches windows by app and title. A window that opens with a different title, such as a browser window with a different active tab, may land in the wrong stage.
 - StageKeeper does not open apps at login; Restore Layout does.
-- Hidden windows sit in a corner of the screen, so they show in Mission Control and can be found by apps that list windows.
-- Only one display arrangement at a time has been tested.
+- Hidden windows sit in a corner of the screen, so they show in Mission Control and can be found by apps that list windows. The cover over the corner also hides anything else you put there.
+- Only one display arrangement at a time has been tested. With separate Spaces per display, a stage covers one display only; see [More than one display](#more-than-one-display).

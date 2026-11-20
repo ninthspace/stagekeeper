@@ -50,9 +50,11 @@ struct Snapshot {
         guard AX.isTrusted(prompt: false) else { throw StageError.notTrusted }
         guard Engine.active else { throw StageError.stageManagerOn }
         // Only the active desktop's windows: with a desktop per display, Accessibility also
-        // lists the other display's windows, which belong to that desktop's stages.
+        // lists the other display's windows, which belong to that desktop's stages. Hidden
+        // windows go by the desktop that hid them, not the display their corner is on.
         var (windows, order) = readWindows()
-        let here = Desktops.onActiveSpace(order)
+        let hidden = Engine.hiddenWindows()
+        let here = Desktops.onActiveSpace(order).subtracting(hidden.elsewhere).union(hidden.here)
         windows = windows.filter { here.contains($0.key) }
         order = order.filter(here.contains)
         let (current, others) = Engine.stages(windows, order: order)

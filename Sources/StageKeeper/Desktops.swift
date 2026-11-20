@@ -49,7 +49,7 @@ enum Desktops {
     static func onActiveSpace(_ ids: [CGWindowID]) -> Set<CGWindowID> {
         guard let connection, let active = symbol("SLSGetActiveSpace", ActiveSpace.self),
               let spaces = symbol("SLSCopySpacesForWindows", SpacesForWindows.self) else { return Set(ids) }
-        let space = active(connection)
+        let space = acting?.spaceID ?? active(connection)
         return Set(ids.filter { id in
             guard let found = spaces(connection, 0x7, [NSNumber(value: id)] as CFArray)?.takeRetainedValue() as? [NSNumber],
                   !found.isEmpty else { return true }
@@ -57,8 +57,30 @@ enum Desktops {
         })
     }
 
+    /// The desktop StageKeeper acts on in place of the active one, for this thread.
+    private static var acting: Desktop? { Thread.current.threadDictionary["StageKeeper.acting"] as? Desktop }
+
+    /// Runs `body` as though `desktop` were the active desktop: `current()` returns it and
+    /// `onActiveSpace` keeps its windows. For switching the stage of a desktop on another display
+    /// when one of its hidden windows is brought forward there.
+    static func acting<T>(as desktop: Desktop, _ body: () throws -> T) rethrows -> T {
+        let dictionary = Thread.current.threadDictionary
+        let previous = dictionary["StageKeeper.acting"]
+        dictionary["StageKeeper.acting"] = desktop
+        defer { dictionary["StageKeeper.acting"] = previous }
+        return try body()
+    }
+
+    /// The desktops showing now, one per display.
+    static func showing() -> Set<Int> {
+        guard let connection, let copy = symbol("SLSCopyManagedDisplaySpaces", ManagedDisplaySpaces.self),
+              let displays = copy(connection)?.takeRetainedValue() as? [[String: Any]] else { return [] }
+        return Set(displays.compactMap { ($0["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? NSNumber }.map(\.intValue))
+    }
+
     /// The desktop showing now, or "main" when the private calls are unavailable.
     static func current() -> Desktop {
+        if let acting { return acting }
         let fallback = Desktop(key: "main", number: 1, spaceID: 0)
         guard let connection, let active = symbol("SLSGetActiveSpace", ActiveSpace.self) else { return fallback }
         let id = active(connection)

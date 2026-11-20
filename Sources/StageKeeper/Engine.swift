@@ -228,8 +228,12 @@ enum Engine {
     /// the current stage.
     static func stages(_ windows: [CGWindowID: LiveWindow], order: [CGWindowID]) -> (current: Stage, others: [Stage]) {
         let existing = Set(Snapshot.serverWindows().keys)
+        let claimed = hiddenWindows().elsewhere
         var placeOnScreen: [LiveWindow] = []
         let result = edit(seedingFrom: windows, order: order) { desktop -> (Stage, [Stage]) in
+            // A window another desktop hid is that desktop's, even if this desktop took it in.
+            for i in desktop.stages.indices { desktop.stages[i].windows.removeAll(where: claimed.contains) }
+            desktop.hidden = desktop.hidden.filter { !claimed.contains(CGWindowID($0.key) ?? 0) }
             prune(&desktop, existing: existing)
             for id in order where desktop.stageIndex(of: id) == nil {
                 guard let window = windows[id] else { continue }
@@ -359,9 +363,30 @@ enum Engine {
         let changed = id != lastFocused
         if !settling { lastFocused = id }
         lock.unlock()
-        guard changed, !settling, inOtherStage(id) else { return }
-        Log.write("The focused \(app.localizedName ?? "") window is in another stage; switching to it.")
-        try? activate(stageWith: id, focus: id)
+        guard changed, !settling else { return }
+        if inOtherStage(id) {
+            Log.write("The focused \(app.localizedName ?? "") window is in another stage; switching to it.")
+            try? activate(stageWith: id, focus: id)
+        } else if let owner = owner(ofHidden: id) {
+            // Hidden windows sit on the rightmost screen, so bringing one forward from Mission
+            // Control or the Dock makes that display's desktop active. Switch the stage on the
+            // desktop that hid it, which brings the window back to its own display.
+            Log.write("The focused \(app.localizedName ?? "") window is hidden by desktop \(owner.number)'s stages; switching to it there.")
+            Desktops.acting(as: owner) { try? activate(stageWith: id, focus: id) }
+        }
+    }
+
+    /// The desktop, other than the active one, that hid `id`, when that desktop is showing on
+    /// its display. A desktop not showing has nowhere to put the window back.
+    private static func owner(ofHidden id: CGWindowID) -> Desktop? {
+        let key = Desktops.current().key
+        let found: String? = {
+            lock.lock(); defer { lock.unlock() }
+            return load().desktops.first { $0.key != key && $0.value.isHidden(id) }?.key
+        }()
+        guard let found, let desktop = Desktops.all().first(where: { $0.key == found }),
+              Desktops.showing().contains(desktop.spaceID) else { return nil }
+        return desktop
     }
 
     /// Switches to the focused window's stage now if it is not the current one, so an action on
@@ -583,6 +608,20 @@ enum Engine {
     static func bringForward(_ id: CGWindowID, snapshot: Snapshot? = nil) {
         guard let window = (snapshot ?? (try? Snapshot.take()))?.windows[id] else { return }
         AX.focus(window)
+    }
+
+    /// The windows this desktop has hidden, and those other desktops have hidden. A hidden window
+    /// sits in the corner of the rightmost screen, so with a desktop per display macOS counts it
+    /// as on that display's desktop; it still belongs to the desktop that hid it.
+    static func hiddenWindows() -> (here: Set<CGWindowID>, elsewhere: Set<CGWindowID>) {
+        lock.lock(); defer { lock.unlock() }
+        let key = Desktops.current().key
+        var here: Set<CGWindowID> = [], elsewhere: Set<CGWindowID> = []
+        for (desktop, state) in load().desktops {
+            let ids = state.hidden.keys.compactMap { CGWindowID($0) }
+            if desktop == key { here.formUnion(ids) } else { elsewhere.formUnion(ids) }
+        }
+        return (here, elsewhere)
     }
 
     /// Where each hidden window on this desktop goes back to, for drawing the stages.

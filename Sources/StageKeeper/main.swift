@@ -13,6 +13,9 @@ Usage:
   stagekeeper switch <label|n>  Switch to a labelled stage by label or shortcut number (asks the menu-bar app).
   stagekeeper agent             Run the menu-bar item.
   stagekeeper reveal            Put back every window StageKeeper hid.
+  stagekeeper update [--check]  Install the newest version from the checkout StageKeeper was built from
+                                (--check only says whether there is one).
+  stagekeeper version           Show the installed version and the checkout it came from.
 
 Layouts:     \(Paths.desktops.path) (one file per desktop)
 Log:         \(Paths.log.path)
@@ -66,6 +69,23 @@ case "switch":
     }
 case "reveal":
     runCLI { Engine.revealAll() }
+case "update":
+    runCLI {
+        switch try Updater.check() {
+        case .upToDate(let version):
+            print("StageKeeper \(version) is up to date.")
+        case .available(let target, let summary):
+            print("Update available: \(summary).")
+            if args.contains("--check") { return }
+            try Updater.installInForeground(target: target)
+        }
+    }
+case "version", "--version":
+    if let installed = Updater.installed() {
+        print("StageKeeper \(installed.version) (\(installed.commit.prefix(7))), built from \(installed.source.path)")
+    } else {
+        print("StageKeeper (no build information; reinstall with scripts/install.sh)")
+    }
 case "agent":
     Log.echo = false
     let app = NSApplication.shared

@@ -22,6 +22,13 @@ Reinstalling restarts the app: it puts every hidden window back on screen, then 
 
 To remove it, run `./scripts/uninstall.sh`. The saved layouts are kept.
 
+### Updates
+
+StageKeeper updates itself from the checkout it was installed from. `install.sh` records the checkout, the commit and the version (`git describe`) in the app, and `stagekeeper version` shows them.
+
+- **Checking:** StageKeeper fetches from origin a minute after it opens and then once a day. When the repository has release tags (`v1.2.0`), an update is a newer tag; without tags, it is any new commit on origin's default branch. When one is found the menu-bar menu says so and shows **Install Update**; otherwise it offers **Check for Updates…**. `stagekeeper update --check` checks from the terminal.
+- **Installing:** **Install Update**, or `stagekeeper update`, fast-forwards the checkout to the update and runs `install.sh`. That rebuilds and re-signs the app on this Mac, so it keeps its Accessibility permission, and restarts it. From the menu the build runs in the background and its output goes to `~/Library/Application Support/StageKeeper/update.log`. An update needs a checkout with no uncommitted changes that can fast-forward; otherwise pull and run `install.sh` yourself.
+
 ## Stages
 
 - **Switching** moves the current stage's windows into the bottom-right corner of the rightmost screen, with one point showing, and moves the new stage's windows back to where they were. A small window of StageKeeper's covers that corner, painted like the wallpaper, so the hidden windows do not show (see [Hiding windows](#hiding-windows)). Switch with the radial menu, the menu-bar menu, All stages, the shortcuts or the Dock apps.
@@ -119,6 +126,8 @@ stagekeeper label "<name>"      Label the current stage ("" removes the label).
 stagekeeper colour <colour>     Colour the current stage: a palette name, #RRGGBB, or none.
 stagekeeper switch <label|n>    Switch to a labelled stage by label or shortcut number.
 stagekeeper reveal              Put every hidden window back on screen.
+stagekeeper update [--check]    Install the newest version from the checkout (--check only reports it).
+stagekeeper version             Show the installed version and the checkout it came from.
 stagekeeper restore [--wait N]  Open saved apps and rebuild this desktop's stages from the save.
 stagekeeper agent               Run the menu-bar item.
 ```

@@ -16,6 +16,13 @@ pkill -x stagekeeper 2>/dev/null || true
 mkdir -p "$APP/Contents/MacOS"
 cp .build/release/stagekeeper "$APP/Contents/MacOS/stagekeeper"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+# Record what was built and from where, for `stagekeeper update` and Check for Updates.
+PLIST="$APP/Contents/Info.plist"
+VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo unknown)"
+# plutil, not PlistBuddy, which splits a value containing spaces. Before codesign: the signature covers it.
+plutil -replace CFBundleShortVersionString -string "${VERSION#v}" "$PLIST"
+plutil -replace StageKeeperCommit -string "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "$PLIST"
+plutil -replace StageKeeperSourcePath -string "$PWD" "$PLIST"
 mkdir -p "$APP/Contents/Resources"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # Sign with SIGN_IDENTITY, else the certificate from make-signing-cert.sh, else ad hoc.

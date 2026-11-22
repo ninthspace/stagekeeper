@@ -27,6 +27,10 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var timer: Timer?
     private var followTimer: Timer?
     private var following = false
+    /// The newest version origin offers, when it is newer than this one.
+    private var update: (target: String, summary: String)?
+    private var checkingForUpdates = false
+    private var updateTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -47,6 +51,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refreshTitle() }
+        startUpdateChecks()
 
         if !AX.isTrusted(prompt: true) {
             item.button?.title = " Needs Accessibility"
@@ -367,6 +372,14 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add(menu, "Settings…", #selector(showSettings), ",")
         add(menu, "Show Dock Apps", #selector(showDockApps), "")
         menu.addItem(.separator())
+        if let update {
+            add(menu, "Install Update (\(update.summary))…", #selector(installUpdate), "")
+        } else {
+            add(menu, checkingForUpdates ? "Checking for Updates…" : "Check for Updates…", #selector(checkForUpdatesNow), "")
+        }
+        if let installed = Updater.installed() {
+            menu.addItem(withTitle: "Version \(installed.version)", action: nil, keyEquivalent: "")
+        }
         add(menu, "Quit StageKeeper", #selector(NSApplication.terminate(_:)), "q", target: NSApp)
     }
 
@@ -539,5 +552,81 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         popover.behavior = .transient
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) { popover.close() }
+    }
+}
+
+// MARK: - Updates
+
+extension MenuBarController {
+    private static let lastCheckKey = "LastUpdateCheck"
+
+    /// Checks shortly after launch and then once a day. The timer fires hourly so a Mac that slept
+    /// through the day still checks soon after it wakes.
+    fileprivate func startUpdateChecks() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in self?.checkIfDue() }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in self?.checkIfDue() }
+    }
+
+    private func checkIfDue() {
+        let last = UserDefaults.standard.object(forKey: Self.lastCheckKey) as? Date ?? .distantPast
+        guard Date().timeIntervalSince(last) > 24 * 3600 else { return }
+        checkForUpdates(reportResult: false)
+    }
+
+    @objc fileprivate func checkForUpdatesNow() { checkForUpdates(reportResult: true) }
+
+    /// A daily check says something only when it finds a version it hasn't mentioned before.
+    private func checkForUpdates(reportResult: Bool) {
+        guard !checkingForUpdates else { return }
+        checkingForUpdates = true
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result { try Updater.check() }
+            DispatchQueue.main.async { [self] in
+                checkingForUpdates = false
+                switch result {
+                case .success(.upToDate(let version)):
+                    UserDefaults.standard.set(Date(), forKey: Self.lastCheckKey)
+                    update = nil
+                    if reportResult { notify("StageKeeper \(version) is up to date.") }
+                case .success(.available(let target, let summary)):
+                    UserDefaults.standard.set(Date(), forKey: Self.lastCheckKey)
+                    let isNew = update?.target != target || update?.summary != summary
+                    update = (target, summary)
+                    if reportResult || isNew { notify("A StageKeeper update is available: \(summary). Choose Install Update in this menu.") }
+                case .failure(let error):
+                    if reportResult { notify("Could not check for updates. \(error)") } else { Log.write("Update check failed: \(error)") }
+                }
+            }
+        }
+    }
+
+    /// Reports a failed install. A successful one quits this app before the deadline.
+    private func watchInstall(until deadline: Date) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            if let code = Updater.installFailure() {
+                self?.notify("The update failed (exit \(code)). StageKeeper was not changed. See \(Updater.log.path).")
+            } else if Date() < deadline {
+                self?.watchInstall(until: deadline)
+            }
+        }
+    }
+
+    @objc fileprivate func installUpdate() {
+        guard let update else { return }
+        let alert = NSAlert()
+        alert.messageText = "Install the StageKeeper update?"
+        alert.informativeText = "\(update.summary). StageKeeper rebuilds itself from its checkout and restarts. Hidden windows come back on screen for a moment and are hidden again. Building takes a minute or so."
+        alert.addButton(withTitle: "Install")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.level = .modalPanel
+        NSApp.activate()
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try Updater.installInBackground(target: update.target)
+            notify("Building the update. StageKeeper restarts when it is ready.")
+            watchInstall(until: Date().addingTimeInterval(15 * 60))
+        } catch {
+            notify("Could not install the update. \(error)")
+        }
     }
 }

@@ -308,11 +308,12 @@ private struct StagesPane: View {
     @State private var shortcuts: [UUID: Shortcut] = [:]
     @State private var message: String?
     @FocusState private var focused: UUID?
+    @State private var deleting: Row?
     private let debounce = Debounce()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Labelled stages on every desktop. Click a label to rename it. A stage set to Automatic takes the next free ⌃⌥1–9.")
+            Text("Labelled stages on every desktop. Click a label to rename it. A stage set to Automatic takes the next free ⌃⌥1–9. Deleting a stage moves its windows into the current stage.")
                 .foregroundStyle(.secondary)
             if rows.isEmpty {
                 Text("No labelled stages yet. Label a stage from the menu bar first.").padding(.top, 20)
@@ -356,12 +357,21 @@ private struct StagesPane: View {
                         .menuIndicator(.hidden)
                         .fixedSize()
                         .help(Shortcuts.isAutomatic(row.id) ? "Automatic" : "Chosen in Settings")
+                        Button { deleting = row } label: { Image(systemName: "trash") }
+                            .buttonStyle(.borderless)
+                            .help("Delete this stage")
                     }
                 }
             }
             if let message { Text(message).foregroundStyle(.red) }
         }
         .onAppear(perform: load)
+        .confirmationDialog("Delete \(deleting?.label ?? "")?", isPresented: Binding(
+            get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
+            Button("Delete", role: .destructive) { if let row = deleting { delete(row) } }
+        } message: {
+            Text("Its windows join the current stage on \(deleting?.desktop ?? "its desktop"); none are closed. Its label, colour, shortcut and Dock app are removed.")
+        }
         // Leaving a label field saves it, as Return does.
         .onChange(of: focused) { previous, _ in
             guard let previous, let index = rows.firstIndex(where: { $0.id == previous }) else { return }
@@ -401,6 +411,19 @@ private struct StagesPane: View {
     private func reload() {
         shortcuts = Shortcuts.stages()
         changed()
+    }
+
+    /// Off the main thread: moving windows waits on their apps.
+    private func delete(_ row: Row) {
+        deleting = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let failure: String? = { do { try Actions.delete(row.id); return nil } catch { return "\(error)" } }()
+            DispatchQueue.main.async {
+                message = failure
+                load()
+                changed()
+            }
+        }
     }
 
     private func setColour(_ row: inout Row, _ hex: String?) {

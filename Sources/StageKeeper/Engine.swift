@@ -535,6 +535,36 @@ enum Engine {
         perform(moves)
     }
 
+    /// Ends the live stage that is the saved stage `id`, on the desktop `key`: its windows join
+    /// that desktop's current stage. On the desktop showing they come on screen now; on another
+    /// desktop `reconcile` brings them back when it shows. The current stage itself keeps its
+    /// windows and only stops being that saved stage.
+    static func dissolve(savedID id: UUID, on key: String) throws {
+        changed()
+        defer { changed() }
+        let here = key == Desktops.current().key
+        let snapshot = here ? try Snapshot.take() : nil
+        var moves: [Move] = []
+        lock.lock()
+        var state = load()
+        if var desktop = state.desktops[key], let index = desktop.stages.firstIndex(where: { $0.savedID == id }) {
+            if index == desktop.current {
+                desktop.stages[index].savedID = nil
+            } else {
+                let windows = desktop.stages.remove(at: index).windows
+                if index < desktop.current { desktop.current -= 1 }
+                desktop.stages[desktop.current].windows += windows
+                if let snapshot {
+                    for window in windows { planShow(window, in: &desktop, windows: snapshot.windows, moves: &moves) }
+                }
+            }
+            state.desktops[key] = desktop
+            write(state)
+        }
+        lock.unlock()
+        perform(moves)
+    }
+
     /// Whether any window is off screen in a hidden stage, on any desktop.
     static var hasHidden: Bool {
         lock.lock(); defer { lock.unlock() }

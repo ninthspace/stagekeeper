@@ -317,6 +317,20 @@ enum Actions {
         Log.write("Forgot the \"\(label)\" stage.")
     }
 
+    /// Deletes a labelled stage on any desktop: its windows join that desktop's current stage,
+    /// and its label, colour, shortcut and Dock app are removed. No window is closed.
+    static func delete(_ id: UUID) throws {
+        guard let found = locate(id) else { throw StageError.other("That stage is no longer saved.") }
+        let key = found.layout.desktop ?? Desktops.current().key
+        let label = found.layout.stages[found.index].label ?? "stage"
+        try Engine.dissolve(savedID: id, on: key)
+        try forget(id)
+        Settings.update { $0.stageShortcuts?[id.uuidString] = nil }
+        // Save this desktop again so its current stage holds the windows it was given.
+        if key == Desktops.current().key { _ = try? save() }
+        Log.write("Deleted the \"\(label)\" stage; its windows joined the current stage.")
+    }
+
     /// The layout and index of a saved stage, on any desktop.
     static func locate(_ id: UUID) -> (layout: Layout, index: Int)? {
         for layout in LayoutStore.loadAll() {

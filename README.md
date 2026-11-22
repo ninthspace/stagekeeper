@@ -35,7 +35,7 @@ StageKeeper updates itself from the checkout it was installed from. `install.sh`
 - **New windows** join the current stage within about half a second. A new tab of an app with native tabs (Ghostty, Finder) joins its tab group's stage. A new window that opens mostly off screen (apps place a new window by their last one, which may be hidden) is moved to the middle of the screen.
 - **Bringing a hidden window forward** yourself (⌘Tab, the Dock, an app's Window menu, Mission Control) switches to its stage.
 - **Moving a window** to another stage, or to a new stage of its own: Move in the radial menu, or **Move Front Window To** in the menu-bar menu. Background tabs of the window go with it.
-- **Closing** every window of a labelled stage keeps the label as a stage with no open windows. Move a window into it to use it again, or choose it in the menu-bar menu to forget it, which removes its label, colour, shortcut and Dock app.
+- **Closing** every window of a labelled stage keeps the label as a stage with no open windows. Move a window into it to use it again, or choose it in the menu-bar menu to forget it, which removes its label, colour, shortcut and Dock app. To remove a labelled stage that still has windows, delete it in Settings (see [Settings](#settings)).
 - Every two seconds StageKeeper checks that the screen matches the stages, and hides or shows any window that is out of step: after a display is connected or removed, an app that did not answer during a switch, or the first visit to a desktop.
 - When StageKeeper quits, or Stage Manager is turned on, hidden windows are put back on screen. `stagekeeper reveal` does the same by hand.
 
@@ -105,7 +105,7 @@ By default, labelled stages get ⌃⌥1 to ⌃⌥9: desktop 1's labelled stages 
 
 **Settings…** (⌘, while the menu is open) opens a window with three tabs:
 
-- **Stages:** every labelled stage on every desktop. Click a label to rename it (a label another stage has is refused). Set its colour from the palette or with any colour, and record its shortcut: click the shortcut, then press a key with ⌃, ⌥ or ⌘ (a function key works on its own; Esc cancels). The menu beside it sets the stage back to Automatic (the next free ⌃⌥1–9) or to no shortcut.
+- **Stages:** every labelled stage on every desktop. Click a label to rename it (a label another stage has is refused). Set its colour from the palette or with any colour, and record its shortcut: click the shortcut, then press a key with ⌃, ⌥ or ⌘ (a function key works on its own; Esc cancels). The menu beside it sets the stage back to Automatic (the next free ⌃⌥1–9) or to no shortcut. The bin deletes the stage, after asking: its windows join the current stage of its desktop and none are closed, and its label, colour, shortcut and Dock app are removed. Deleting the current stage leaves its windows where they are, as a stage without a label. A stage on another desktop gives its windows to that desktop's current stage, and they come on screen when you next go there.
 - **Palette:** rename, recolour, add and remove the colours offered for stages. Restore Defaults puts back the ten built-in colours. Changing a palette colour does not recolour stages that already use it.
 - **Shortcuts:** the shortcut for Fetch Bookmarked Windows (⌃⌥0 by default), or none.
 

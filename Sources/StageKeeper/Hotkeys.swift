@@ -3,9 +3,11 @@ import Carbon
 
 /// Global shortcuts through the Carbon hot-key API, which needs no extra permission. Each
 /// labelled stage has one (see `Shortcuts`), and Fetch Bookmarked Windows has one that is
-/// registered only while a window is bookmarked, so unused keys stay free for other apps.
+/// registered only while a window is bookmarked, so unused keys stay free for other apps. The
+/// radial menu has one too, for opening it where a trackpad gesture cannot reach StageKeeper,
+/// such as over Screen Sharing.
 enum Hotkeys {
-    enum Target: Hashable { case stage(UUID), fetch }
+    enum Target: Hashable { case stage(UUID), fetch, radial }
 
     static var handler: ((Target) -> Void)?
     private static var refs: [EventHotKeyRef] = []

@@ -16,6 +16,8 @@ struct Shortcut: Codable, Hashable {
     private static let digitCodes = [kVK_ANSI_0, kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4,
                                      kVK_ANSI_5, kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9]
     static func digit(_ n: Int) -> Shortcut { Shortcut(keyCode: UInt32(digitCodes[n]), modifiers: defaultModifiers.rawValue) }
+    /// The radial menu's default: ⌃⌥R. (⌃⌥Space is the input-source switch.)
+    static let radial = Shortcut(keyCode: UInt32(kVK_ANSI_R), modifiers: defaultModifiers.rawValue)
 
     var flags: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: modifiers) }
 
@@ -94,6 +96,8 @@ struct Settings: Codable {
     var palette: [PaletteColour]?
     /// Fetch Bookmarked Windows; `Shortcut.none` turns it off.
     var fetchShortcut: Shortcut?
+    /// Opens the radial menu at the pointer; `Shortcut.none` turns it off.
+    var radialShortcut: Shortcut?
     /// Shortcuts chosen for labelled stages, by stage ID. A stage not listed gets the next free
     /// ⌃⌥1–9; `Shortcut.none` gives it none.
     var stageShortcuts: [String: Shortcut]?
@@ -121,8 +125,13 @@ extension Paths {
     static var settings: URL { directory.appendingPathComponent("settings.json") }
 }
 
-/// Which shortcut each labelled stage and Fetch Bookmarked Windows has.
+/// Which shortcut each labelled stage, Fetch Bookmarked Windows and the radial menu has.
 enum Shortcuts {
+    static var radial: Shortcut? {
+        let chosen = Settings.current.radialShortcut ?? .radial
+        return chosen.isNone ? nil : chosen
+    }
+
     static var fetch: Shortcut? {
         let chosen = Settings.current.fetchShortcut ?? .digit(0)
         return chosen.isNone ? nil : chosen
@@ -134,6 +143,7 @@ enum Shortcuts {
         let chosen = Settings.current.stageShortcuts ?? [:]
         var taken = Set(chosen.values.filter { !$0.isNone })
         if let fetch { taken.insert(fetch) }
+        if let radial { taken.insert(radial) }
         var result: [UUID: Shortcut] = [:]
         var digit = 1
         for stage in Actions.numbered() {
@@ -152,17 +162,20 @@ enum Shortcuts {
 
     static func isAutomatic(_ id: UUID) -> Bool { Settings.current.stageShortcuts?[id.uuidString] == nil }
 
-    /// The shortcuts to register now: every stage's, and Fetch's while a window is bookmarked.
+    /// The shortcuts to register now: every stage's, the radial menu's, and Fetch's while a
+    /// window is bookmarked.
     static func wanted(fetchActive: Bool) -> [Hotkeys.Target: Shortcut] {
         var wanted: [Hotkeys.Target: Shortcut] = [:]
         for (id, shortcut) in stages() { wanted[.stage(id)] = shortcut }
         if fetchActive, let fetch { wanted[.fetch] = fetch }
+        if let radial { wanted[.radial] = radial }
         return wanted
     }
 
     /// What already uses a shortcut, other than `except`, or nil when it is free.
     static func user(of shortcut: Shortcut, except: Hotkeys.Target) -> String? {
         if except != .fetch, shortcut == fetch { return "Fetch Bookmarked Windows" }
+        if except != .radial, shortcut == radial { return "the radial menu" }
         let labels = Dictionary(uniqueKeysWithValues: Actions.numbered().compactMap { s in s.id.map { ($0, s.label ?? "a stage") } })
         for (id, other) in stages() where other == shortcut && except != .stage(id) { return labels[id] ?? "another stage" }
         return nil
@@ -496,6 +509,7 @@ private struct PalettePane: View {
 private struct ShortcutsPane: View {
     let changed: () -> Void
     @State private var fetch = Shortcuts.fetch
+    @State private var radial = Shortcuts.radial
     @State private var message: String?
 
     var body: some View {
@@ -515,7 +529,22 @@ private struct ShortcutsPane: View {
             }
             Text("It is registered only while a window is bookmarked, so other apps can use it otherwise.")
                 .foregroundStyle(.secondary)
-            Text("Stage shortcuts are on the Stages tab. The radial menu opens with a four-finger click or tap on the trackpad.")
+            HStack {
+                Text("Radial Menu").frame(maxWidth: .infinity, alignment: .leading)
+                ShortcutRecorder(shortcut: radial, target: .radial, changed: { radial = Shortcuts.radial; changed() }, message: $message)
+                Menu {
+                    Button("Default (⌃⌥R)") { Settings.update { $0.radialShortcut = nil }; radial = Shortcuts.radial; changed() }
+                    Button("No Shortcut") { Settings.update { $0.radialShortcut = Shortcut.none }; radial = Shortcuts.radial; changed() }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+            }
+            Text("Opens the radial menu at the pointer, as a four-finger click or tap does. Use it where the trackpad gestures cannot reach StageKeeper, such as over Screen Sharing.")
+                .foregroundStyle(.secondary)
+            Text("Stage shortcuts are on the Stages tab.")
                 .foregroundStyle(.secondary)
             if let message { Text(message).foregroundStyle(.red) }
             Spacer()
@@ -564,6 +593,7 @@ private struct ShortcutRecorder: View {
             }
             switch target {
             case .fetch: Settings.update { $0.fetchShortcut = candidate }
+            case .radial: Settings.update { $0.radialShortcut = candidate }
             case .stage(let id): Settings.update { $0.stageShortcuts = ($0.stageShortcuts ?? [:]).merging([id.uuidString: candidate]) { $1 } }
             }
             stop()

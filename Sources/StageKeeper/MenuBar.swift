@@ -47,6 +47,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Hotkeys.handler = { [weak self] target in
             switch target {
             case .fetch: self?.fetchPinned()
+            case .radial: self?.radial?.toggle(at: NSEvent.mouseLocation, byKeyboard: true)
             case .stage(let id): self?.perform { try Actions.switchTo(id: id) }
             }
         }

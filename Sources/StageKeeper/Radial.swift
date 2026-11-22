@@ -32,32 +32,35 @@ final class RadialMenu {
         if overview.isOpen { overview.close() } else { showOverview() }
     }
 
-    func toggle(at point: NSPoint) {
+    /// `byKeyboard` when a shortcut opened it: an ⌥ in the shortcut, still held as the menu
+    /// opens, does not put it in Move.
+    func toggle(at point: NSPoint, byKeyboard: Bool = false) {
         if overview.isOpen { overview.close(); return }
-        if panel != nil { close(animated: true) } else { open(at: point) }
+        if panel != nil { close(animated: true) } else { open(at: point, byKeyboard: byKeyboard) }
     }
 
     private var opening = false
 
     /// Opens the menu once the stages match the focused window, which may switch stages: done
     /// off the main thread, since moving windows waits on their apps.
-    func open(at point: NSPoint) {
+    func open(at point: NSPoint, byKeyboard: Bool = false) {
         guard !opening else { return }
         opening = true
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             Engine.matchFocus()
             DispatchQueue.main.async {
                 self?.opening = false
-                self?.present(at: point)
+                self?.present(at: point, byKeyboard: byKeyboard)
             }
         }
     }
 
-    private func present(at point: NSPoint) {
+    private func present(at point: NSPoint, byKeyboard: Bool) {
         guard panel == nil else { return }
         let model: RadialModel
         do { model = try RadialModel.read(at: point) } catch { hooks.notify("\(error)"); return }
         let view = RadialView(model: model, menu: self)
+        view.ignoresOption = byKeyboard && NSEvent.modifierFlags.contains(.option)
         let size = view.size
         let offset = NSPoint(x: view.centre.x * RadialView.scale, y: view.centre.y * RadialView.scale)
         var origin = NSPoint(x: point.x - offset.x, y: point.y + offset.y - size.height)
@@ -508,7 +511,12 @@ final class RadialView: NSView {
     // MARK: Content
 
     /// ⌥ is read from the keyboard as it is now, so a stale flag cannot leave the menu in Move.
-    private var effectiveMode: Mode { mode == .switchStage && NSEvent.modifierFlags.contains(.option) ? .move : mode }
+    private var effectiveMode: Mode {
+        mode == .switchStage && !ignoresOption && NSEvent.modifierFlags.contains(.option) ? .move : mode
+    }
+
+    /// Set when the menu opened from a shortcut with ⌥ still held; cleared once ⌥ is let go.
+    var ignoresOption = false
 
     private var items: [Item] {
         switch effectiveMode {
@@ -671,7 +679,11 @@ final class RadialView: NSView {
     override func mouseMoved(with event: NSEvent) { pointerMoved(to: convert(event.locationInWindow, from: nil)) }
     override func mouseDragged(with event: NSEvent) { pointerMoved(to: convert(event.locationInWindow, from: nil)) }
 
-    override func flagsChanged(with event: NSEvent) { syncMoveArc(); needsDisplay = true }
+    override func flagsChanged(with event: NSEvent) {
+        if !event.modifierFlags.contains(.option) { ignoresOption = false }
+        syncMoveArc()
+        needsDisplay = true
+    }
 
     /// In Move, the stages show in the arcs below the menu, in place of the stages ring.
     private func syncMoveArc() {

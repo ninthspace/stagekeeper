@@ -49,7 +49,7 @@ After a restart StageKeeper rebuilds each desktop's stages from its last save th
 
 ## Radial menu
 
-Click or tap the trackpad with four fingers to open a round menu at the pointer. It does not take focus, so the app you were using stays in front. Tile, Bookmark and Move act on the window of the current stage that was under the pointer when the menu opened, or on the front window when the pointer was not over one. Esc, a click outside, or another four-finger click or tap closes it.
+Click or tap the trackpad with four fingers, or press ⌃⌥R, to open a round menu at the pointer. The shortcut is for when the trackpad gestures cannot reach StageKeeper: over Screen Sharing, a four-finger gesture opens the menu of the Mac you are sitting at, not the one you are viewing, while the shortcut is passed through. An ⌥ in the shortcut, still held as the menu opens, does not put it in Move. It does not take focus, so the app you were using stays in front. Tile, Bookmark and Move act on the window of the current stage that was under the pointer when the menu opened, or on the front window when the pointer was not over one. Esc, a click outside, another four-finger click or tap, or the shortcut again closes it.
 
 - **Inner ring:** this desktop's stages (up to eight), most recently used first. A labelled stage shows its label on a tile in its colour; a stage without a label shows its position in the ring, and the box under the menu names its apps. The current stage is outlined in white. Click one to switch to it. Hold ⌥ to move the window instead.
 - **Windows:** rest the pointer on a stage for a moment and the outer ring shows that stage's windows in place of the actions (up to eight), each with its app's icon and title. They stay while the pointer crosses other stages or the centre on its way to one. Click a window to switch to its stage and bring it to the front.
@@ -107,7 +107,7 @@ By default, labelled stages get ⌃⌥1 to ⌃⌥9: desktop 1's labelled stages 
 
 - **Stages:** every labelled stage on every desktop. Click a label to rename it (a label another stage has is refused). Set its colour from the palette or with any colour, and record its shortcut: click the shortcut, then press a key with ⌃, ⌥ or ⌘ (a function key works on its own; Esc cancels). The menu beside it sets the stage back to Automatic (the next free ⌃⌥1–9) or to no shortcut. The bin deletes the stage, after asking: its windows join the current stage of its desktop and none are closed, and its label, colour, shortcut and Dock app are removed. Deleting the current stage leaves its windows where they are, as a stage without a label. A stage on another desktop gives its windows to that desktop's current stage, and they come on screen when you next go there.
 - **Palette:** rename, recolour, add and remove the colours offered for stages. Restore Defaults puts back the ten built-in colours. Changing a palette colour does not recolour stages that already use it.
-- **Shortcuts:** the shortcut for Fetch Bookmarked Windows (⌃⌥0 by default), or none.
+- **Shortcuts:** the shortcuts for Fetch Bookmarked Windows (⌃⌥0 by default) and the radial menu (⌃⌥R by default), or none.
 
 `open stagekeeper://settings` also opens the window.
 
@@ -218,7 +218,7 @@ Apps with native tabs (Ghostty, Finder) make each tab a window of its own, and A
 
 ### Shortcuts, Dock apps and wallpaper
 
-- **Shortcuts** use the Carbon hot-key API, which needs no extra permission. Fetch Bookmarked Windows is registered only while a window is bookmarked, so its key stays free for other apps otherwise.
+- **Shortcuts** use the Carbon hot-key API, which needs no extra permission. Fetch Bookmarked Windows is registered only while a window is bookmarked, so its key stays free for other apps otherwise. The radial menu's is registered all the time.
 - **Dock apps** are small apps that open `stagekeeper://switch/<stage id>`. Each finds its stage by the ID in its Info.plist, so a rename renames the app in place. Finder and the Dock show `/` as `:`, and `:` is not allowed in a file name, so both become `-` in the app's name.
 - **Wallpaper colours** are 16-pixel PNGs that macOS stretches to fill the screen. macOS sets a wallpaper for the desktop showing on each screen, so your own wallpaper is recorded per screen and desktop.
 - **Labels** stay with their stage: each stage records which saved stage it is, so a label stays when windows move between stages.

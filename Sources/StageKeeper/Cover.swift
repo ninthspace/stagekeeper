@@ -18,10 +18,11 @@ final class CornerCover {
     private let view = CoverView()
     private var signature: String?
 
-    /// Shows the cover while any desktop has hidden windows, and hides it otherwise. Cheap when
-    /// nothing changed, so it can run on every tick.
+    /// Shows the cover while any desktop has hidden windows and more than one screen is
+    /// connected, and hides it otherwise: on a single screen the corner is too much of the
+    /// working area to give up. Cheap when nothing changed, so it can run on every tick.
     func update() {
-        guard Engine.active, Engine.hasHidden, let screen = Screens.hidingScreen else {
+        guard Engine.active, NSScreen.screens.count > 1, Engine.hasHidden, let screen = Screens.hidingScreen else {
             panel?.orderOut(nil)
             return
         }

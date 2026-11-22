@@ -50,7 +50,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .stage(let id): self?.perform { try Actions.switchTo(id: id) }
             }
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refreshTitle() }
+        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refreshTitleIfChanged() }
         startUpdateChecks()
 
         if !AX.isTrusted(prompt: true) {
@@ -196,6 +196,21 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshTitle()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.refreshTitle() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.refreshTitle() }
+    }
+
+    private var lastRefresh: String?
+
+    /// The periodic refresh. A refresh reads every app's windows through Accessibility, so it
+    /// runs only when something it shows may have changed: the windows on screen, the desktop,
+    /// the stages, or the saved layout. Switches, labels and colours refresh directly.
+    private func refreshTitleIfChanged() {
+        let key = [Snapshot.onScreenAppWindowIDs().sorted().map(String.init).joined(separator: ","),
+                   Desktops.current().key,
+                   "\(Engine.stateDate?.timeIntervalSince1970 ?? 0)",
+                   "\(LayoutStore.modified?.timeIntervalSince1970 ?? 0)"].joined(separator: "|")
+        guard key != lastRefresh, !busy else { return }
+        lastRefresh = key
+        refreshTitle()
     }
 
     /// Updates the menu-bar title, the wallpaper and the registered shortcuts.

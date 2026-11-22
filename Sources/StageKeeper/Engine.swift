@@ -405,6 +405,14 @@ enum Engine {
     // MARK: Keeping the screen in step
 
     nonisolated(unsafe) private static var lastScreens: [CGRect] = []
+    /// Windows the last full read could not act on, with their frame then: Accessibility does
+    /// not list them (a tab group's background tabs, some apps' windows on another desktop), so
+    /// they look out of step to the cheap check every time. Skipped by the cheap check until
+    /// their frame changes, so they do not cause a full read every two seconds.
+    nonisolated(unsafe) private static var unreachable: [CGWindowID: CGRect] = [:]
+
+    /// The modification date of the engine state, which changes whenever the stages do.
+    static var stateDate: Date? { modified() }
 
     /// Makes the screen match the state when they differ: hides windows of other stages that
     /// are showing, shows hidden windows of the current stage, brings a window of the current
@@ -425,11 +433,15 @@ enum Engine {
         let screensChanged = !lastScreens.isEmpty && screens != lastScreens
         lastScreens = screens
         lock.unlock()
+        let server = Snapshot.serverWindows()
         if !force, let desktop = read() {
-            let server = Snapshot.serverWindows()
+            lock.lock()
+            let skipped = unreachable
+            lock.unlock()
             let wrong = desktop.stages.indices.contains { index in
                 desktop.stages[index].windows.contains { id in
                     guard let frame = server[id]?.frame else { return false }
+                    if let then = skipped[id], Screens.sameFrame(then, frame) { return false }
                     let showing = Screens.visibleFraction(of: frame) >= 0.1
                     return index == desktop.current ? desktop.isHidden(id) || !showing : !desktop.isHidden(id) && showing
                 }
@@ -439,11 +451,15 @@ enum Engine {
         guard let snapshot = try? Snapshot.take() else { return }
         var moves: [Move] = []
         var lost: [LiveWindow] = []
+        var missed: [CGWindowID: CGRect] = [:]
         edit { desktop in
             let corner = Screens.hidingCorner
             for (index, stage) in desktop.stages.enumerated() {
                 for id in stage.windows {
-                    guard let window = snapshot.windows[id] else { continue }
+                    guard let window = snapshot.windows[id] else {
+                        if let frame = server[id]?.frame { missed[id] = frame }
+                        continue
+                    }
                     let showing = Screens.visibleFraction(of: window.frame) >= 0.1
                     if index != desktop.current {
                         if desktop.isHidden(id) {
@@ -459,6 +475,9 @@ enum Engine {
                 }
             }
         }
+        lock.lock()
+        unreachable = missed
+        lock.unlock()
         perform(moves)
         lost.forEach(bringOnScreen)
         if !moves.isEmpty || !lost.isEmpty {

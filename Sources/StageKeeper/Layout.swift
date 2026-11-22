@@ -117,6 +117,11 @@ enum LayoutStore {
     /// The layout of the desktop showing now.
     static func load() -> Layout? { load(Desktops.current().key) }
 
+    /// When this desktop's layout was last saved.
+    static var modified: Date? {
+        (try? FileManager.default.attributesOfItem(atPath: Paths.layout(for: Desktops.current().key).path))?[.modificationDate] as? Date
+    }
+
     static func load(_ desktop: String) -> Layout? {
         migrateLegacy()
         guard let data = try? Data(contentsOf: Paths.layout(for: desktop)),

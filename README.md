@@ -31,7 +31,7 @@ StageKeeper updates itself from the checkout it was installed from. `install.sh`
 
 ## Stages
 
-- **Switching** moves the current stage's windows into the bottom-right corner of the rightmost screen, with one point showing, and moves the new stage's windows back to where they were. A small window of StageKeeper's covers that corner, painted like the wallpaper, so the hidden windows do not show (see [Hiding windows](#hiding-windows)). Switch with the radial menu, the menu-bar menu, All stages, the shortcuts or the Dock apps.
+- **Switching** moves the current stage's windows into the bottom-right corner of the rightmost screen, with one point showing, and moves the new stage's windows back to where they were. With more than one screen, a small window of StageKeeper's covers that corner, painted like the wallpaper, so the hidden windows do not show (see [Hiding windows](#hiding-windows)). Switch with the radial menu, the menu-bar menu, All stages, the shortcuts or the Dock apps.
 - **New windows** join the current stage within about half a second. A new tab of an app with native tabs (Ghostty, Finder) joins its tab group's stage. A new window that opens mostly off screen (apps place a new window by their last one, which may be hidden) is moved to the middle of the screen.
 - **Bringing a hidden window forward** yourself (⌘Tab, the Dock, an app's Window menu, Mission Control) switches to its stage.
 - **Moving a window** to another stage, or to a new stage of its own: Move in the radial menu, or **Move Front Window To** in the menu-bar menu. Background tabs of the window go with it.
@@ -161,7 +161,7 @@ macOS gives an app no public way to hide one window, count fingers on a trackpad
 ### Hiding windows
 
 - **The corner.** A hidden window is moved to the bottom-right corner of the rightmost screen, less one point, and its frame is recorded so it can go back. macOS moves a window back on screen if none of it shows. Hiding the app would hide all its windows, and minimising animates and fills the Dock.
-- **What stays visible.** macOS keeps a window's title bar on screen, so each hidden window leaves a strip one point wide and 30 to 65 points tall in the corner, with its shadow around it. StageKeeper covers the corner with a small window of its own, 72 by 150 points, above other windows. It is painted with what the wallpaper shows there: the stage colour, or the matching crop of your wallpaper image placed as macOS places it. It ignores clicks and stays out of Mission Control, and is shown only while windows are hidden. It reads the wallpaper every 0.4 seconds, so a new stage colour reaches it within half a second. With a moving or aerial wallpaper it paints the wallpaper's still image, which may differ a little from what shows.
+- **What stays visible.** macOS keeps a window's title bar on screen, so each hidden window leaves a strip one point wide and 30 to 65 points tall in the corner, with its shadow around it. StageKeeper covers the corner with a small window of its own, 72 by 150 points, above other windows. It is painted with what the wallpaper shows there: the stage colour, or the matching crop of your wallpaper image placed as macOS places it. It ignores clicks and stays out of Mission Control, and is shown only while windows are hidden and more than one screen is connected; on a single screen the corner is too much of the working area to cover, so the strip shows. It reads the wallpaper every 0.4 seconds, so a new stage colour reaches it within half a second. With a moving or aerial wallpaper it paints the wallpaper's still image, which may differ a little from what shows.
 - **One real screen's corner.** The corner of all screens together can lie on no screen, so the corner of the rightmost screen is used (the lowest, of screens equally far right).
 - **Windows already off screen.** A window that is already off screen when hidden has no frame worth keeping, so none is recorded and it comes to the middle of the screen when its stage shows.
 - **Slow apps.** Switching plans the moves under a lock and carries them out after, so an app that is slow to move a window does not hold up the menu or the other moves.
@@ -191,7 +191,8 @@ Tried and dropped:
 
 - **Polling.** Picking a window from an app's Dock menu or Window menu changes the focused window without activating an app, so no notification arrives. StageKeeper checks the focused window every 0.4 seconds.
 - **Settling.** For 1.5 seconds after StageKeeper switches or moves windows itself it does not follow focus: until the new stage's app comes forward, the app you left still reports its now hidden window as focused.
-- **Keeping the screen in step.** Every two seconds a cheap read of the window server decides whether any window is out of step with its stage; only then does the full Accessibility read run. It is skipped while the focused window is in another stage, since following focus is about to switch to it.
+- **Keeping the screen in step.** Every two seconds a cheap read of the window server decides whether any window is out of step with its stage; only then does the full Accessibility read run. It is skipped while the focused window is in another stage, since following focus is about to switch to it. Windows the full read cannot act on, because Accessibility does not list them (a tab group's background tabs, some windows on another desktop), would look out of step on every check, so the cheap check skips them until their frame changes.
+- **Refreshing the menu bar.** Every 3 seconds the title is refreshed only if the windows on screen, the desktop, the stages or the saved layout changed since the last refresh, since a refresh reads every app's windows. Switching, labelling and colouring refresh it at once.
 
 ### Tabs
 
@@ -231,5 +232,5 @@ Apps with native tabs (Ghostty, Finder) make each tab a window of its own, and A
 
 - Restore matches windows by app and title. A window that opens with a different title, such as a browser window with a different active tab, may land in the wrong stage.
 - StageKeeper does not open apps at login; Restore Layout does.
-- Hidden windows sit in a corner of the screen, so they show in Mission Control and can be found by apps that list windows. The cover over the corner also hides anything else you put there.
+- Hidden windows sit in a corner of the screen, so they show in Mission Control and can be found by apps that list windows. With more than one screen, the cover over the corner also hides anything else you put there.
 - Only one display arrangement at a time has been tested. With separate Spaces per display, a stage covers one display only; see [More than one display](#more-than-one-display).

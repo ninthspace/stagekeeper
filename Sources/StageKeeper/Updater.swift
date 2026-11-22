@@ -71,7 +71,9 @@ enum Updater {
         let branch = (try? git(dir, "rev-parse", "--abbrev-ref", "origin/HEAD")) ?? "origin/main"
         let behind = Int(try git(dir, "rev-list", "--count", "\(installed.commit)..\(branch)")) ?? 0
         if behind == 0 { return .upToDate(installed.version) }
-        return .available(target: branch, summary: "\(behind) new commit\(behind == 1 ? "" : "s") on \(branch.replacingOccurrences(of: "origin/", with: ""))")
+        // Worded as Claude Monitor words it: the remote's short commit and how many commits it adds.
+        let latest = try git(dir, "rev-parse", "--short", branch)
+        return .available(target: branch, summary: "\(latest) (\(behind == 1 ? "1 new commit" : "\(behind) new commits"))")
     }
 
     /// The shell commands that fast-forward the checkout to `target` and reinstall.

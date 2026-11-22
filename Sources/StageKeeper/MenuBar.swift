@@ -372,10 +372,12 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add(menu, "Settings…", #selector(showSettings), ",")
         add(menu, "Show Dock Apps", #selector(showDockApps), "")
         menu.addItem(.separator())
-        if let update {
-            add(menu, "Install Update (\(update.summary))…", #selector(installUpdate), "")
+        // The same items, in the same order and words, as Claude Monitor's menu.
+        if let update { add(menu, "Update Available: Install \(update.summary)…", #selector(installUpdate), "") }
+        if checkingForUpdates {
+            menu.addItem(withTitle: "Checking for Updates…", action: nil, keyEquivalent: "")
         } else {
-            add(menu, checkingForUpdates ? "Checking for Updates…" : "Check for Updates…", #selector(checkForUpdatesNow), "")
+            add(menu, "Check for Updates…", #selector(checkForUpdatesNow), "")
         }
         if let installed = Updater.installed() {
             menu.addItem(withTitle: "Version \(installed.version)", action: nil, keyEquivalent: "")
@@ -575,7 +577,8 @@ extension MenuBarController {
 
     @objc fileprivate func checkForUpdatesNow() { checkForUpdates(reportResult: true) }
 
-    /// A daily check says something only when it finds a version it hasn't mentioned before.
+    /// A daily check only updates the menu. A check from the menu answers with an alert, worded as
+    /// Claude Monitor's are, and offers to install what it finds.
     private func checkForUpdates(reportResult: Bool) {
         guard !checkingForUpdates else { return }
         checkingForUpdates = true
@@ -587,17 +590,33 @@ extension MenuBarController {
                 case .success(.upToDate(let version)):
                     UserDefaults.standard.set(Date(), forKey: Self.lastCheckKey)
                     update = nil
-                    if reportResult { notify("StageKeeper \(version) is up to date.") }
+                    if reportResult { alert("StageKeeper is up to date", "You have \(version), the newest version.") }
                 case .success(.available(let target, let summary)):
                     UserDefaults.standard.set(Date(), forKey: Self.lastCheckKey)
-                    let isNew = update?.target != target || update?.summary != summary
                     update = (target, summary)
-                    if reportResult || isNew { notify("A StageKeeper update is available: \(summary). Choose Install Update in this menu.") }
+                    if reportResult { installUpdate() }
                 case .failure(let error):
-                    if reportResult { notify("Could not check for updates. \(error)") } else { Log.write("Update check failed: \(error)") }
+                    if reportResult { alert("Couldn't check for updates", "\(error)") } else { Log.write("Update check failed: \(error)") }
                 }
             }
         }
+    }
+
+    private static let restartNote = "Installing pulls the checkout, rebuilds the app and restarts it, which takes about a minute. Hidden windows come back on screen for a moment and are hidden again."
+
+    /// Shows an alert; with `button`, also Later, returning whether `button` was chosen.
+    @discardableResult
+    private func alert(_ title: String, _ text: String, button: String? = nil) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        if let button {
+            alert.addButton(withTitle: button)
+            alert.addButton(withTitle: "Later")
+        }
+        alert.window.level = .modalPanel
+        NSApp.activate()
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// Reports a failed install. A successful one quits this app before the deadline.
@@ -613,14 +632,8 @@ extension MenuBarController {
 
     @objc fileprivate func installUpdate() {
         guard let update else { return }
-        let alert = NSAlert()
-        alert.messageText = "Install the StageKeeper update?"
-        alert.informativeText = "\(update.summary). StageKeeper rebuilds itself from its checkout and restarts. Hidden windows come back on screen for a moment and are hidden again. Building takes a minute or so."
-        alert.addButton(withTitle: "Install")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.level = .modalPanel
-        NSApp.activate()
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let version = Updater.installed()?.version ?? "an older version"
+        guard alert("Update available", "\(update.summary) is available; you have \(version).\n\n\(Self.restartNote)", button: "Install") else { return }
         do {
             try Updater.installInBackground(target: update.target)
             notify("Building the update. StageKeeper restarts when it is ready.")

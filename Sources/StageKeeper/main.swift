@@ -75,7 +75,7 @@ case "update":
         case .upToDate(let version):
             print("StageKeeper \(version) is up to date.")
         case .available(let target, let summary):
-            print("Update available: \(summary).")
+            print("Update available: \(Updater.installed()?.version ?? "?") → \(summary)")
             if args.contains("--check") { return }
             try Updater.installInForeground(target: target)
         }

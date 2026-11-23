@@ -385,8 +385,10 @@ final class RadialView: NSView {
 
     private func animate() {
         guard ticker == nil else { return }
-        let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] _ in
-            guard let self else { return }
+        let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] timer in
+            // A menu closed without animation frees the view mid-animation; the run loop
+            // still holds the timer, so it must stop itself or fire 120 times a second forever.
+            guard let self else { timer.invalidate(); return }
             self.needsDisplay = true
             if !self.animating {
                 self.ticker?.invalidate()

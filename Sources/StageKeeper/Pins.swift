@@ -1,8 +1,8 @@
 import AppKit
 
-/// A bookmarked window (called a pin in the code): Fetch Bookmarked Windows (⌃⌥0) brings it
-/// into the current stage from whichever stage holds it. Ordinary switches leave bookmarked
-/// windows where they are.
+/// A bookmarked window (called a pin in the code): every stage switch on its desktop carries it
+/// into the stage switched to. Fetch Bookmarked Windows (⌃⌥0) brings one that was left in
+/// another stage, by Move or before it was bookmarked, into the current stage.
 struct Pin: Codable, Equatable {
     var bundleID: String
     var appName: String

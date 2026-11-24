@@ -413,13 +413,9 @@ enum Actions {
         throw StageError.other("\(name) is on \(place). Switch to that desktop first.")
     }
 
-    /// Makes `stage` current. With `carryPins`, bookmarked windows of the stage being left come along.
-    static func switchTo(_ stage: LiveStage, in snapshot: Snapshot, carryPins: Bool = false) throws {
+    /// Makes `stage` current. Bookmarked windows of the stage being left come along.
+    static func switchTo(_ stage: LiveStage, in snapshot: Snapshot) throws {
         guard stage.kind != .current, let first = stage.windowIDs.first else { return }
-        if carryPins {
-            let pinned = Pins.resolve(snapshot).filter { snapshot.current.contains($0) }
-            if !pinned.isEmpty { try Engine.move(pinned, toStageWith: first, snapshot: snapshot) }
-        }
         try Engine.activate(stageWith: first, snapshot: snapshot)
         let names = stage.windowIDs.compactMap { snapshot.windows[$0]?.appName }
         Log.write("Switched to the stage with \(Array(Set(names)).sorted().joined(separator: ", ")).")

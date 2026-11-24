@@ -156,7 +156,7 @@ final class RadialMenu {
             hooks.notify("Removed the bookmark from the \(window.appName) window.")
         } else {
             Pins.pin(window)
-            hooks.notify("Bookmarked the \(window.appName) window. \(Shortcuts.fetch.map { "Press \($0.display)" } ?? "Choose Fetch Bookmarked Windows") to bring bookmarked windows into the stage you are in.")
+            hooks.notify("Bookmarked the \(window.appName) window. It moves with you when you switch stages.")
         }
         hooks.refresh()
     }

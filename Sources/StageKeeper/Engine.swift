@@ -488,23 +488,44 @@ enum Engine {
     // MARK: Acting
 
     /// Shows the stage holding `window`, hiding the current one, and brings `focus` (or the
-    /// stage's last front window) to the front. Pass a snapshot taken for the same action to
+    /// stage's last front window) to the front. Bookmarked windows of the current stage move
+    /// into the stage shown. A stage left with no windows goes. Pass a snapshot taken for the same action to
     /// save reading the windows again.
     static func activate(stageWith window: CGWindowID, focus: CGWindowID? = nil, snapshot given: Snapshot? = nil) throws {
         changed()
         defer { changed() }
         let snapshot = try given ?? Snapshot.take()
+        let bookmarked = Pins.resolve(snapshot)
+        let server = bookmarked.isEmpty ? [:] : Snapshot.serverWindows()
         var moves: [Move] = []
         var shown: [CGWindowID] = []
+        var carried: [CGWindowID] = []
         edit { desktop in
-            guard let target = desktop.stageIndex(of: window) else { return }
+            guard var target = desktop.stageIndex(of: window) else { return }
             shown = desktop.stages[target].windows
             guard target != desktop.current else { return }
-            hide(stage: desktop.current, in: &desktop, windows: snapshot.windows, moves: &moves)
+            // Bookmarked windows of the stage being left join the target stage, with their
+            // background tabs, and stay where they are on screen.
+            let leaving = desktop.current
+            carried = desktop.stages[leaving].windows.filter { bookmarked.contains($0) }
+            for id in carried {
+                guard let pid = snapshot.windows[id]?.pid else { continue }
+                carried += desktop.stages[leaving].windows.filter { snapshot.windows[$0] == nil && server[$0]?.pid == pid && !carried.contains($0) }
+            }
+            if !carried.isEmpty {
+                desktop.stages[leaving].windows.removeAll { carried.contains($0) }
+                desktop.stages[target].windows += carried
+            }
+            hide(stage: leaving, in: &desktop, windows: snapshot.windows, moves: &moves)
+            if desktop.stages[leaving].windows.isEmpty {
+                desktop.stages.remove(at: leaving)
+                if target > leaving { target -= 1 }
+            }
             desktop.current = target
             show(stage: target, in: &desktop, windows: snapshot.windows, moves: &moves)
         }
         perform(moves)
+        if !carried.isEmpty { Log.write("Carried \(carried.count) bookmarked windows into the stage switched to.") }
         let front = focus ?? FocusHistory.frontmost(of: shown.filter { snapshot.windows[$0] != nil }) ?? window
         if let element = snapshot.windows[front] { AX.focus(element) }
     }

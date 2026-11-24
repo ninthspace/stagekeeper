@@ -335,7 +335,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let pinItem = NSMenuItem(title: "\(pinned ? "Remove Bookmark from" : "Bookmark") \(window.appName) Window", action: #selector(togglePin(_:)), keyEquivalent: "")
             pinItem.target = self
             pinItem.representedObject = NSNumber(value: front)
-            pinItem.toolTip = "Fetch Bookmarked Windows\(Shortcuts.fetch.map { " (\($0.display))" } ?? "") brings bookmarked windows into the stage you are in."
+            pinItem.toolTip = "A bookmarked window moves with you when you switch stages."
             menu.addItem(pinItem)
         }
         let pins = Pins.load()
@@ -424,7 +424,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             notify("Removed the bookmark from the \(window.appName) window.")
         } else {
             Pins.pin(window)
-            notify("Bookmarked the \(window.appName) window. \(Shortcuts.fetch.map { "Press \($0.display)" } ?? "Choose Fetch Bookmarked Windows") to bring bookmarked windows into the stage you are in.")
+            notify("Bookmarked the \(window.appName) window. It moves with you when you switch stages.")
         }
     }
 

@@ -68,7 +68,7 @@ Mission Control shows hidden windows too, small, because they sit in the screen'
 
 ## Bookmarked windows
 
-**Bookmark <App> Window** bookmarks the window you are working in. **Fetch Bookmarked Windows** (⌃⌥0, available while a window is bookmarked) moves bookmarked windows from other stages into the stage you are in. **Bookmarked Windows** lists the bookmarks; choose one to remove it. A closed window loses its bookmark, and bookmarks are matched by app and window title after a restart. Bookmarked windows stay on their own desktop.
+**Bookmark <App> Window** bookmarks the window you are working in. A bookmarked window moves with you: each time you switch stages on its desktop, by any means, it joins the stage you switch to and stays where it is on screen. A stage left with only bookmarked windows goes. **Fetch Bookmarked Windows** (⌃⌥0, available while a window is bookmarked) moves bookmarked windows that are in other stages, for example one moved there with Move, into the stage you are in. **Bookmarked Windows** lists the bookmarks; choose one to remove it. A closed window loses its bookmark, and bookmarks are matched by app and window title after a restart. Bookmarked windows stay on their own desktop.
 
 ## Desktops
 

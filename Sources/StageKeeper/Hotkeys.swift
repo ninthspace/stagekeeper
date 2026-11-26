@@ -5,9 +5,9 @@ import Carbon
 /// labelled stage has one (see `Shortcuts`), and Fetch Bookmarked Windows has one that is
 /// registered only while a window is bookmarked, so unused keys stay free for other apps. The
 /// radial menu has one too, for opening it where a trackpad gesture cannot reach StageKeeper,
-/// such as over Screen Sharing.
+/// such as over Screen Sharing. Back and Forward go through the stages switched between.
 enum Hotkeys {
-    enum Target: Hashable { case stage(UUID), fetch, radial }
+    enum Target: Hashable { case stage(UUID), fetch, radial, back, forward }
 
     static var handler: ((Target) -> Void)?
     private static var refs: [EventHotKeyRef] = []

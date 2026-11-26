@@ -492,6 +492,12 @@ enum Engine {
     /// into the stage shown. A stage left with no windows goes. Pass a snapshot taken for the same action to
     /// save reading the windows again.
     static func activate(stageWith window: CGWindowID, focus: CGWindowID? = nil, snapshot given: Snapshot? = nil) throws {
+        try activate(stageWith: window, focus: focus, snapshot: given, step: nil)
+    }
+
+    /// `step` is set when Back or Forward makes the switch, which records the stage left on the
+    /// other list instead of starting a new path.
+    private static func activate(stageWith window: CGWindowID, focus: CGWindowID?, snapshot given: Snapshot?, step: Step?) throws {
         changed()
         defer { changed() }
         let snapshot = try given ?? Snapshot.take()
@@ -516,6 +522,7 @@ enum Engine {
                 desktop.stages[leaving].windows.removeAll { carried.contains($0) }
                 desktop.stages[target].windows += carried
             }
+            record(left: desktop.stages[leaving].windows, step: step)
             hide(stage: leaving, in: &desktop, windows: snapshot.windows, moves: &moves)
             if desktop.stages[leaving].windows.isEmpty {
                 desktop.stages.remove(at: leaving)
@@ -528,6 +535,61 @@ enum Engine {
         if !carried.isEmpty { Log.write("Carried \(carried.count) bookmarked windows into the stage switched to.") }
         let front = focus ?? FocusHistory.frontmost(of: shown.filter { snapshot.windows[$0] != nil }) ?? window
         if let element = snapshot.windows[front] { AX.focus(element) }
+    }
+
+    // MARK: Back and forward
+
+    enum Step { case back, forward }
+
+    /// Each desktop's stage switches, as browsers keep pages: `back` holds the stages left, most
+    /// recent last, and `forward` the stages Back left. A stage is recorded as its windows, and
+    /// found again as the stage holding the first of them still open, so it survives stages
+    /// being added, removed or reordered. Kept in memory only.
+    private struct History {
+        var back: [[CGWindowID]] = []
+        var forward: [[CGWindowID]] = []
+    }
+
+    nonisolated(unsafe) private static var histories: [String: History] = [:]
+    private static let historyLimit = 50
+
+    /// Records the stage being left on this desktop. Called under the lock.
+    private static func record(left windows: [CGWindowID], step: Step?) {
+        guard !windows.isEmpty else { return }
+        let key = Desktops.current().key
+        var history = histories[key] ?? History()
+        switch step {
+        case nil:
+            history.back.append(windows)
+            history.forward = []
+        case .back:
+            history.forward.append(windows)
+        case .forward:
+            history.back.append(windows)
+        }
+        history.back = Array(history.back.suffix(historyLimit))
+        history.forward = Array(history.forward.suffix(historyLimit))
+        histories[key] = history
+    }
+
+    /// Switches to the stage before (or after) the current one in this desktop's history,
+    /// skipping stages that have since closed or are current. False when there is none.
+    @discardableResult
+    static func go(_ step: Step) throws -> Bool {
+        let target: CGWindowID? = {
+            lock.lock(); defer { lock.unlock() }
+            guard let desktop = read() else { return nil }
+            let key = Desktops.current().key
+            var history = histories[key] ?? History()
+            defer { histories[key] = history }
+            while let entry = step == .back ? history.back.popLast() : history.forward.popLast() {
+                if let id = entry.first(where: { desktop.stageIndex(of: $0).map { $0 != desktop.current } ?? false }) { return id }
+            }
+            return nil
+        }()
+        guard let target else { return false }
+        try activate(stageWith: target, focus: nil, snapshot: nil, step: step)
+        return true
     }
 
     /// Moves windows into the stage holding `target` (or into a new stage when `target` is nil),

@@ -101,13 +101,15 @@ On a stage with no colour, and when StageKeeper quits, your own wallpaper comes 
 
 By default, labelled stages get ⌃⌥1 to ⌃⌥9: desktop 1's labelled stages first, in alphabetical order of label, then desktop 2's, and so on. The menu shows each stage's shortcut. Adding, removing or renaming a label can change these numbers; a shortcut chosen in Settings does not change. A shortcut does nothing when its stage has no open windows.
 
+⌃⌥[ goes back to the stage you switched from, and pressing it again goes further back. ⌃⌥] goes forward again after going back. Each desktop keeps its own history, so these act on the desktop of the display you are working on. Every way of switching counts: a shortcut, the menu, the radial menu, a Dock app, or clicking a window of another stage. Switching any way other than Back or Forward clears the forward history, as following a link does in a browser. A stage that has closed since is skipped. The history is kept only while StageKeeper runs.
+
 ## Settings
 
 **Settings…** (⌘, while the menu is open) opens a window with three tabs:
 
 - **Stages:** every labelled stage on every desktop. Click a label to rename it (a label another stage has is refused). Set its colour from the palette or with any colour, and record its shortcut: click the shortcut, then press a key with ⌃, ⌥ or ⌘ (a function key works on its own; Esc cancels). The menu beside it sets the stage back to Automatic (the next free ⌃⌥1–9) or to no shortcut. The bin deletes the stage, after asking: its windows join the current stage of its desktop and none are closed, and its label, colour, shortcut and Dock app are removed. Deleting the current stage leaves its windows where they are, as a stage without a label. A stage on another desktop gives its windows to that desktop's current stage, and they come on screen when you next go there.
 - **Palette:** rename, recolour, add and remove the colours offered for stages. Restore Defaults puts back the ten built-in colours. Changing a palette colour does not recolour stages that already use it.
-- **Shortcuts:** the shortcuts for Fetch Bookmarked Windows (⌃⌥0 by default) and the radial menu (⌃⌥R by default), or none.
+- **Shortcuts:** the shortcuts for Fetch Bookmarked Windows (⌃⌥0 by default), the radial menu (⌃⌥R by default), and Back and Forward (⌃⌥[ and ⌃⌥] by default), or none.
 
 `open stagekeeper://settings` also opens the window.
 
@@ -218,7 +220,7 @@ Apps with native tabs (Ghostty, Finder) make each tab a window of its own, and A
 
 ### Shortcuts, Dock apps and wallpaper
 
-- **Shortcuts** use the Carbon hot-key API, which needs no extra permission. Fetch Bookmarked Windows is registered only while a window is bookmarked, so its key stays free for other apps otherwise. The radial menu's is registered all the time.
+- **Shortcuts** use the Carbon hot-key API, which needs no extra permission. Fetch Bookmarked Windows is registered only while a window is bookmarked, so its key stays free for other apps otherwise. The radial menu's, Back's and Forward's are registered all the time.
 - **Dock apps** are small apps that open `stagekeeper://switch/<stage id>`. Each finds its stage by the ID in its Info.plist, so a rename renames the app in place. Finder and the Dock show `/` as `:`, and `:` is not allowed in a file name, so both become `-` in the app's name.
 - **Wallpaper colours** are 16-pixel PNGs that macOS stretches to fill the screen. macOS sets a wallpaper for the desktop showing on each screen, so your own wallpaper is recorded per screen and desktop.
 - **Labels** stay with their stage: each stage records which saved stage it is, so a label stays when windows move between stages.

@@ -49,6 +49,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .fetch: self?.fetchPinned()
             case .radial: self?.radial?.toggle(at: NSEvent.mouseLocation, byKeyboard: true)
             case .stage(let id): self?.perform { try Actions.switchTo(id: id) }
+            case .back: self?.perform { try Actions.step(.back) }
+            case .forward: self?.perform { try Actions.step(.forward) }
             }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refreshTitleIfChanged() }

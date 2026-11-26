@@ -18,6 +18,10 @@ struct Shortcut: Codable, Hashable {
     static func digit(_ n: Int) -> Shortcut { Shortcut(keyCode: UInt32(digitCodes[n]), modifiers: defaultModifiers.rawValue) }
     /// The radial menu's default: ⌃⌥R. (⌃⌥Space is the input-source switch.)
     static let radial = Shortcut(keyCode: UInt32(kVK_ANSI_R), modifiers: defaultModifiers.rawValue)
+    /// Back and Forward through the stages: ⌃⌥[ and ⌃⌥], as ⌘[ and ⌘] go back and forward in
+    /// browsers. (⌃⌥← and ⌃⌥→ are window-tiling keys in Rectangle and similar apps.)
+    static let back = Shortcut(keyCode: UInt32(kVK_ANSI_LeftBracket), modifiers: defaultModifiers.rawValue)
+    static let forward = Shortcut(keyCode: UInt32(kVK_ANSI_RightBracket), modifiers: defaultModifiers.rawValue)
 
     var flags: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: modifiers) }
 
@@ -98,6 +102,9 @@ struct Settings: Codable {
     var fetchShortcut: Shortcut?
     /// Opens the radial menu at the pointer; `Shortcut.none` turns it off.
     var radialShortcut: Shortcut?
+    /// Back and Forward through the stages switched between; `Shortcut.none` turns one off.
+    var backShortcut: Shortcut?
+    var forwardShortcut: Shortcut?
     /// Shortcuts chosen for labelled stages, by stage ID. A stage not listed gets the next free
     /// ⌃⌥1–9; `Shortcut.none` gives it none.
     var stageShortcuts: [String: Shortcut]?
@@ -125,10 +132,20 @@ extension Paths {
     static var settings: URL { directory.appendingPathComponent("settings.json") }
 }
 
-/// Which shortcut each labelled stage, Fetch Bookmarked Windows and the radial menu has.
+/// Which shortcut each labelled stage, Fetch Bookmarked Windows, the radial menu, Back and Forward have.
 enum Shortcuts {
     static var radial: Shortcut? {
         let chosen = Settings.current.radialShortcut ?? .radial
+        return chosen.isNone ? nil : chosen
+    }
+
+    static var back: Shortcut? {
+        let chosen = Settings.current.backShortcut ?? .back
+        return chosen.isNone ? nil : chosen
+    }
+
+    static var forward: Shortcut? {
+        let chosen = Settings.current.forwardShortcut ?? .forward
         return chosen.isNone ? nil : chosen
     }
 
@@ -144,6 +161,8 @@ enum Shortcuts {
         var taken = Set(chosen.values.filter { !$0.isNone })
         if let fetch { taken.insert(fetch) }
         if let radial { taken.insert(radial) }
+        if let back { taken.insert(back) }
+        if let forward { taken.insert(forward) }
         var result: [UUID: Shortcut] = [:]
         var digit = 1
         for stage in Actions.numbered() {
@@ -162,13 +181,15 @@ enum Shortcuts {
 
     static func isAutomatic(_ id: UUID) -> Bool { Settings.current.stageShortcuts?[id.uuidString] == nil }
 
-    /// The shortcuts to register now: every stage's, the radial menu's, and Fetch's while a
-    /// window is bookmarked.
+    /// The shortcuts to register now: every stage's, the radial menu's, Back's, Forward's, and
+    /// Fetch's while a window is bookmarked.
     static func wanted(fetchActive: Bool) -> [Hotkeys.Target: Shortcut] {
         var wanted: [Hotkeys.Target: Shortcut] = [:]
         for (id, shortcut) in stages() { wanted[.stage(id)] = shortcut }
         if fetchActive, let fetch { wanted[.fetch] = fetch }
         if let radial { wanted[.radial] = radial }
+        if let back { wanted[.back] = back }
+        if let forward { wanted[.forward] = forward }
         return wanted
     }
 
@@ -176,6 +197,8 @@ enum Shortcuts {
     static func user(of shortcut: Shortcut, except: Hotkeys.Target) -> String? {
         if except != .fetch, shortcut == fetch { return "Fetch Bookmarked Windows" }
         if except != .radial, shortcut == radial { return "the radial menu" }
+        if except != .back, shortcut == back { return "Back" }
+        if except != .forward, shortcut == forward { return "Forward" }
         let labels = Dictionary(uniqueKeysWithValues: Actions.numbered().compactMap { s in s.id.map { ($0, s.label ?? "a stage") } })
         for (id, other) in stages() where other == shortcut && except != .stage(id) { return labels[id] ?? "another stage" }
         return nil
@@ -510,6 +533,8 @@ private struct ShortcutsPane: View {
     let changed: () -> Void
     @State private var fetch = Shortcuts.fetch
     @State private var radial = Shortcuts.radial
+    @State private var back = Shortcuts.back
+    @State private var forward = Shortcuts.forward
     @State private var message: String?
 
     var body: some View {
@@ -543,6 +568,34 @@ private struct ShortcutsPane: View {
                 .fixedSize()
             }
             Text("Opens the radial menu at the pointer, as a four-finger click or tap does. Use it where the trackpad gestures cannot reach StageKeeper, such as over Screen Sharing.")
+                .foregroundStyle(.secondary)
+            HStack {
+                Text("Back").frame(maxWidth: .infinity, alignment: .leading)
+                ShortcutRecorder(shortcut: back, target: .back, changed: { back = Shortcuts.back; changed() }, message: $message)
+                Menu {
+                    Button("Default (⌃⌥[)") { Settings.update { $0.backShortcut = nil }; back = Shortcuts.back; changed() }
+                    Button("No Shortcut") { Settings.update { $0.backShortcut = Shortcut.none }; back = Shortcuts.back; changed() }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+            }
+            HStack {
+                Text("Forward").frame(maxWidth: .infinity, alignment: .leading)
+                ShortcutRecorder(shortcut: forward, target: .forward, changed: { forward = Shortcuts.forward; changed() }, message: $message)
+                Menu {
+                    Button("Default (⌃⌥])") { Settings.update { $0.forwardShortcut = nil }; forward = Shortcuts.forward; changed() }
+                    Button("No Shortcut") { Settings.update { $0.forwardShortcut = Shortcut.none }; forward = Shortcuts.forward; changed() }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+            }
+            Text("Back goes to the stage you switched from on this desktop, and again to the one before that. Forward goes the other way after Back. Switching any other way starts a new path, as following a link does in a browser.")
                 .foregroundStyle(.secondary)
             Text("Stage shortcuts are on the Stages tab.")
                 .foregroundStyle(.secondary)
@@ -594,6 +647,8 @@ private struct ShortcutRecorder: View {
             switch target {
             case .fetch: Settings.update { $0.fetchShortcut = candidate }
             case .radial: Settings.update { $0.radialShortcut = candidate }
+            case .back: Settings.update { $0.backShortcut = candidate }
+            case .forward: Settings.update { $0.forwardShortcut = candidate }
             case .stage(let id): Settings.update { $0.stageShortcuts = ($0.stageShortcuts ?? [:]).merging([id.uuidString: candidate]) { $1 } }
             }
             stop()

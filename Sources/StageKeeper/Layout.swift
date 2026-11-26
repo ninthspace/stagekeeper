@@ -421,6 +421,16 @@ enum Actions {
         Log.write("Switched to the stage with \(Array(Set(names)).sorted().joined(separator: ", ")).")
     }
 
+    /// Goes back to the stage switched from, or forward again after going back.
+    static func step(_ step: Engine.Step) throws {
+        Engine.matchFocus()
+        guard try Engine.go(step) else {
+            throw StageError.other(step == .back ? "There is no earlier stage to go back to on this desktop."
+                                                 : "There is no later stage to go forward to on this desktop.")
+        }
+        Log.write(step == .back ? "Went back to the previous stage." : "Went forward to the next stage.")
+    }
+
     /// Brings bookmarked windows that are in other stages into the current stage.
     static func fetchPinned() throws {
         let snapshot = try Snapshot.take()

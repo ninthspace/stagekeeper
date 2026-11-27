@@ -7,6 +7,7 @@ Usage:
   stagekeeper save              Save every stage on this desktop (labels are kept).
   stagekeeper restore [--wait N] Open saved apps and rebuild the stages (waits up to N s, default 90, for windows).
   stagekeeper list              Show this desktop's stages and their labels.
+  stagekeeper list --json       Print stages.json (labelled stages, current stage) with agentRunning, for other tools.
   stagekeeper label "<name>"    Label the current stage ("" removes the label).
   stagekeeper colour <colour>   Colour the current stage: a name (\(Palette.colours.map(\.name).joined(separator: ", "))),
                                 #RRGGBB, or none.
@@ -44,6 +45,13 @@ case "restore":
     if let i = args.firstIndex(of: "--wait"), i + 1 < args.count, let n = Double(args[i + 1]) { restorer.waitSeconds = n }
     runCLI { _ = try restorer.run() }
 case "list":
+    if args.contains("--json") {
+        let result = ListJSON.render(stateFile: Paths.directory.appendingPathComponent(StagesFile.fileName)) {
+            AgentCheck.isAgent(pid: $0, ownPid: getpid())
+        }
+        print(result.output)
+        exit(result.status)
+    }
     runCLI { print(try Actions.describe()) }
 case "timings":
     runCLI { print(Snapshot.timings()) }

@@ -124,6 +124,7 @@ The command-line tool needs Accessibility permission for the terminal that runs 
 ```
 stagekeeper save                Save every stage on this desktop (labels are kept).
 stagekeeper list                Show this desktop's stages and their labels.
+stagekeeper list --json         Print stages.json: every labelled stage in shortcut order, the current one marked, with agentRunning.
 stagekeeper label "<name>"      Label the current stage ("" removes the label).
 stagekeeper colour <colour>     Colour the current stage: a palette name, #RRGGBB, or none.
 stagekeeper switch <label|n>    Switch to a labelled stage by label or shortcut number.

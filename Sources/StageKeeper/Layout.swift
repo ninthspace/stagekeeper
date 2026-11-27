@@ -302,8 +302,14 @@ enum Actions {
     /// desktop, so labelling a stage on one desktop does not renumber another desktop's stages.
     /// The first nine get ⌃⌥1–9.
     static func numbered() -> [SavedStage] {
-        let order = Dictionary(uniqueKeysWithValues: Desktops.all().enumerated().map { ($1.key, $0) })
-        let layouts = LayoutStore.loadAll().sorted { (order[$0.desktop ?? ""] ?? .max) < (order[$1.desktop ?? ""] ?? .max) }
+        numbered(desktops: Desktops.all(), layouts: LayoutStore.loadAll())
+    }
+
+    /// `numbered()` for given desktops and layouts. A layout for a desktop not in `desktops`
+    /// sorts last.
+    static func numbered(desktops: [Desktop], layouts: [Layout]) -> [SavedStage] {
+        let order = Dictionary(uniqueKeysWithValues: desktops.enumerated().map { ($1.key, $0) })
+        let layouts = layouts.sorted { (order[$0.desktop ?? ""] ?? .max) < (order[$1.desktop ?? ""] ?? .max) }
         return layouts.flatMap { layout in
             layout.stages.filter { $0.label != nil && $0.id != nil }
                 .sorted { $0.label!.localizedStandardCompare($1.label!) == .orderedAscending }
@@ -501,16 +507,25 @@ enum Actions {
             throw StageError.other("The current stage has no window to move.")
         }
         let label = found.layout.stages[found.index].label ?? "that stage"
-        if snapshot.current.count > 1 { try Engine.move([front], toStageWith: nil, snapshot: snapshot) }
-        var layout = found.layout
+        let alone = snapshot.current.count == 1
+        // A fresh save gives a layout of this boot: `Engine.adopt` ignores one from an earlier
+        // boot, whose window IDs macOS has since reused, and the stage would stay unlabelled.
+        var layout = try save()
+        guard let target = layout.stages.firstIndex(where: { $0.id == id }) else {
+            throw StageError.other("That stage is no longer in the saved layout.")
+        }
+        if !alone { try Engine.move([front], toStageWith: nil, snapshot: snapshot) }
         let saved = SavedWindow(bundleID: window.bundleID, appName: window.appName, title: window.title,
                                 frame: SavedRect(window.frame), windowID: window.id)
         for index in layout.stages.indices {
             layout.stages[index].windows.removeAll { $0.windowID == window.id }
+            if alone { layout.stages[index].current = false }
         }
-        layout.stages[found.index].windows = [saved]
-        layout.stages[found.index].current = snapshot.current.count == 1
-        try LayoutStore.write(layout, keepPrevious: true)
+        layout.stages[target].windows = [saved]
+        layout.stages[target].current = alone
+        let targetID = layout.stages[target].id
+        layout.stages.removeAll { $0.windows.isEmpty && $0.label == nil && $0.id != targetID }
+        try LayoutStore.write(layout, keepPrevious: false)
         Log.write("Moved the \(window.appName) window into the empty \"\(label)\" stage.")
     }
 

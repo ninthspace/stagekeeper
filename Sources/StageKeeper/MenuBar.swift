@@ -53,7 +53,10 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .forward: self?.perform { try Actions.step(.forward) }
             }
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refreshTitleIfChanged() }
+        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            self?.refreshTitleIfChanged()
+            self?.writeStages()
+        }
         startUpdateChecks()
 
         if !AX.isTrusted(prompt: true) {
@@ -224,6 +227,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if Engine.hasHidden { Engine.revealAll() }
             button.title = " Stage Manager is on"
             button.image = Self.symbol
+            writeStages()
             return
         }
         let layout = LayoutStore.load()
@@ -241,6 +245,20 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.title = name.isEmpty ? "" : " \(Self.truncate(name))"
         button.image = saved?.color.map { Palette.dot($0) } ?? Self.symbol
         Wallpaper.apply(saved?.color)
+        currentStageID = saved?.id
+        writeStages()
+    }
+
+    /// The labelled stage the last refresh found showing, for `stages.json`.
+    private var currentStageID: UUID?
+
+    /// Writes `stages.json` for other tools, from the saved layouts and the stage the last refresh
+    /// found showing. Cheap: it reads only the layout files, and writes only when the content changed.
+    private func writeStages() {
+        StagesFile.write(
+            StagesFile.encode(numbered: Actions.numbered(), currentID: currentStageID, stageManagerOn: !Engine.active,
+                              agentPid: ProcessInfo.processInfo.processIdentifier, now: Date()),
+            to: Paths.directory)
     }
 
     private func appNames(_ stage: LiveStage, _ snapshot: Snapshot) -> String {
